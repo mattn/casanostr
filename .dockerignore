@@ -1,0 +1,5 @@
+casanostr
+casanostr.db
+build/
+*.o
+t/gen_event

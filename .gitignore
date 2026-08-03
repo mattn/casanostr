@@ -1,0 +1,9 @@
+casanostr
+t/gen_event
+*.o
+*.db
+*.db-wal
+*.db-shm
+build/
+kustomize/
+__pycache__/
