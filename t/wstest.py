@@ -126,6 +126,14 @@ def main():
     assert r[0] == "OK" and r[2] is False, r
     print("reject invalid: ok")
 
+    # a second "content" is signed as one value but read as another by
+    # last-wins parsers, so the whole event must be rejected
+    dup = json.dumps(["EVENT", ev2]).replace('"id":', '"content":"SPOOFED","id":', 1)
+    a.send_text(dup)
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is False and "duplicate" in r[3], r
+    print("reject duplicate member: ok")
+
     # REQ: stored event comes back, then EOSE
     jsend(a, ["REQ", "s1", {"authors": [ev1["pubkey"]], "kinds": [1]}])
     r = jrecv(a)

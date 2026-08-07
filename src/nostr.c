@@ -34,6 +34,20 @@ field(const cJSON *ev, const char *name) {
   return cJSON_GetObjectItemCaseSensitive((cJSON *)ev, name);
 }
 
+/* Validation reads the first member of a given name while the stored copy
+ * keeps every one of them, so a second "content" would be signed as one
+ * value and displayed as another by any last-wins parser. */
+static bool
+has_duplicate_member(const cJSON *ev) {
+  const cJSON *a, *b;
+  for (a = ev->child; a != NULL; a = a->next) {
+    if (a->string == NULL) continue;
+    for (b = a->next; b != NULL; b = b->next)
+      if (b->string != NULL && strcmp(a->string, b->string) == 0) return true;
+  }
+  return false;
+}
+
 char *
 nostr_event_canonical(const cJSON *ev) {
   const cJSON *pubkey = field(ev, "pubkey");
@@ -85,6 +99,7 @@ nostr_event_validate(const cJSON *ev) {
   double k;
 
   if (!cJSON_IsObject(ev)) return "invalid: event is not an object";
+  if (has_duplicate_member(ev)) return "invalid: duplicate member in event";
   id = field(ev, "id");
   pubkey = field(ev, "pubkey");
   sig = field(ev, "sig");
