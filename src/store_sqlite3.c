@@ -227,7 +227,10 @@ db_event(const cJSON *ev, const char *raw) {
     }
   }
 
-  execf("COMMIT");
+  /* replaceable and addressable events prune the older rows before the
+   * insert, so committing a failed insert would drop the stored event
+   * without putting the new one in its place */
+  execf(res == STORE_ERROR ? "ROLLBACK" : "COMMIT");
   pthread_mutex_unlock(&g_mutex);
   return res;
 }
