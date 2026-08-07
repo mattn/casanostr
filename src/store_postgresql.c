@@ -52,6 +52,21 @@ exec(const char *sql, int n, const char **vals) {
   return true;
 }
 
+/* Reconnect if the server connection was dropped; call with g_mutex held.
+ * An operation that loses the connection midway still fails; the next one
+ * comes through here and recovers. */
+static bool
+ensure_conn(void) {
+  if (PQstatus(g_conn) == CONNECTION_OK) return true;
+  PQreset(g_conn);
+  if (PQstatus(g_conn) != CONNECTION_OK) {
+    fprintf(stderr, "postgres: %s", PQerrorMessage(g_conn));
+    return false;
+  }
+  fprintf(stderr, "postgres: reconnected\n");
+  return true;
+}
+
 static bool
 db_init(const char *conninfo) {
   PGresult *r;
@@ -178,7 +193,7 @@ insert_tags(const cJSON *ev, const char *id, bool addressable) {
 }
 
 static store_result
-db_event(const cJSON *ev, const char *raw) {
+db_event_try(const cJSON *ev, const char *raw) {
   const cJSON *jid = field(ev, "id"), *jpk = field(ev, "pubkey");
   const cJSON *jca = field(ev, "created_at"), *jk = field(ev, "kind");
   const char *id, *pubkey;
@@ -201,7 +216,7 @@ db_event(const cJSON *ev, const char *raw) {
   if (kind >= 20000 && kind < 30000) return STORE_EPHEMERAL;
 
   pthread_mutex_lock(&g_mutex);
-  if (!exec("BEGIN", 0, NULL)) {
+  if (!ensure_conn() || !exec("BEGIN", 0, NULL)) {
     pthread_mutex_unlock(&g_mutex);
     return STORE_ERROR;
   }
@@ -307,7 +322,7 @@ struct row {
 };
 
 static bool
-db_query(const cJSON *filter,
+db_query_try(const cJSON *filter,
          int (*emit)(const char *id, const char *raw, void *ud),
          void *ud) {
   struct buf b = {NULL, 0, 0, false};
@@ -319,6 +334,10 @@ db_query(const cJSON *filter,
   if (!cJSON_IsObject(filter)) return false;
 
   pthread_mutex_lock(&g_mutex);
+  if (!ensure_conn()) {
+    pthread_mutex_unlock(&g_mutex);
+    return false;
+  }
   buf_add(&b, "SELECT id, raw FROM event WHERE TRUE");
   for (f = filter->child; f != NULL; f = f->next) {
     const char *key = f->string;
@@ -399,6 +418,27 @@ db_query(const cJSON *filter,
   }
   free(rows);
   return ok;
+}
+
+/* A dropped connection is only noticed when a statement fails, so the
+ * first operation after an outage always errors out.  Retry it once:
+ * ensure_conn() reconnects at the start of the second attempt. */
+static store_result
+db_event(const cJSON *ev, const char *raw) {
+  store_result res = db_event_try(ev, raw);
+  if (res == STORE_ERROR && PQstatus(g_conn) != CONNECTION_OK)
+    res = db_event_try(ev, raw);
+  return res;
+}
+
+static bool
+db_query(const cJSON *filter,
+         int (*emit)(const char *id, const char *raw, void *ud), void *ud) {
+  if (!db_query_try(filter, emit, ud)) {
+    if (PQstatus(g_conn) == CONNECTION_OK) return false;
+    return db_query_try(filter, emit, ud);
+  }
+  return true;
 }
 
 void
