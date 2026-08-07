@@ -32,7 +32,8 @@ EV_FUTURE=$("$GEN_EVENT" -s "$SK" -k 1 -c "from the future" -T $((NOW + 9999)))
 
 python3 t/wstest.py "$PORT" "$EV1" "$EV2" "$BAD" \
   "$META_OLD" "$META_NEW" "$EV3" "$EVD" \
-  "$EV_EXPIRED" "$EV_EXPSOON" "$EV_FUTURE"
+  "$EV_EXPIRED" "$EV_EXPSOON" "$EV_FUTURE" \
+  "$SK" "$GEN_EVENT"
 
 curl -sf -H 'Accept: application/nostr+json' "http://127.0.0.1:$PORT/" |
   grep -q '"name":"casanostr"'
