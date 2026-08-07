@@ -282,8 +282,14 @@ db_query(const cJSON *filter,
       sqlite3_str_appendf(s, " AND created_at <= %lld",
                           (long long)f->valuedouble);
     } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
-      limit = (int)f->valuedouble;
-    } else if (key[0] == '#' && key[1] != '\0') {
+      double v = f->valuedouble;
+      if (v >= 0) {
+        /* clamp before the cast so a huge double stays in range; a limit of
+         * zero asks for no stored events and is not an unset limit */
+        limit = v > 1000 ? 1000 : (int)v;
+        if (limit == 0) none = true;
+      }
+    } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
       if (!cJSON_IsArray(f)) { none = true; continue; }
       sqlite3_str_appendf(s, " AND EXISTS (SELECT 1 FROM tag WHERE"
                              " tag.event_id = event.id AND tag.name = %Q"
@@ -295,8 +301,6 @@ db_query(const cJSON *filter,
       if (n == 0) none = true;
     }
   }
-  if (limit < 1) limit = 1;
-  if (limit > 1000) limit = 1000;
   sqlite3_str_appendf(s, " ORDER BY created_at DESC, id ASC LIMIT %d", limit);
   sql = sqlite3_str_finish(s);
 
