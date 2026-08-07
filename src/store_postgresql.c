@@ -18,7 +18,9 @@ static const char *schema =
     "  pubkey TEXT NOT NULL,"
     "  created_at BIGINT NOT NULL,"
     "  kind INTEGER NOT NULL,"
-    "  raw TEXT NOT NULL"
+    "  tags JSONB NOT NULL,"
+    "  content TEXT NOT NULL,"
+    "  sig TEXT NOT NULL"
     ");"
     "CREATE TABLE IF NOT EXISTS tag ("
     "  event_id TEXT NOT NULL REFERENCES event(id) ON DELETE CASCADE,"
@@ -33,7 +35,7 @@ static const char *schema =
     /* NIP-50: content lives inside the stored JSON, so index the extracted
      * value rather than the serialized event */
     "CREATE INDEX IF NOT EXISTS idx_event_content_search ON event"
-    " USING gin (to_tsvector('simple', raw::jsonb->>'content'));";
+    " USING gin (to_tsvector('simple', content));";
 
 /* run a parameterized statement; NULL on error (caller must PQclear) */
 static PGresult *
@@ -203,10 +205,11 @@ insert_tags(const cJSON *ev, const char *id, bool addressable) {
 }
 
 static store_result
-db_event_try(const cJSON *ev, const char *raw) {
+db_event_try(const cJSON *ev, char *tags_json) {
   const cJSON *jid = field(ev, "id"), *jpk = field(ev, "pubkey");
   const cJSON *jca = field(ev, "created_at"), *jk = field(ev, "kind");
-  const char *id, *pubkey;
+  const cJSON *jc = field(ev, "content"), *js = field(ev, "sig");
+  const char *id, *pubkey, *content, *sig;
   char kbuf[16], cbuf[32];
   long long created_at;
   int kind;
@@ -214,10 +217,12 @@ db_event_try(const cJSON *ev, const char *raw) {
   store_result res = STORE_NEW;
 
   if (!cJSON_IsString(jid) || !cJSON_IsString(jpk) || !cJSON_IsNumber(jca) ||
-      !cJSON_IsNumber(jk))
+      !cJSON_IsNumber(jk) || !cJSON_IsString(jc) || !cJSON_IsString(js))
     return STORE_ERROR;
   id = jid->valuestring;
   pubkey = jpk->valuestring;
+  content = jc->valuestring;
+  sig = js->valuestring;
   created_at = (long long)jca->valuedouble;
   kind = (int)jk->valuedouble;
   snprintf(kbuf, sizeof kbuf, "%d", kind);
@@ -253,10 +258,11 @@ db_event_try(const cJSON *ev, const char *raw) {
   }
 
   if (res == STORE_NEW) {
-    const char *vals[5] = {id, pubkey, cbuf, kbuf, raw};
-    PGresult *r = run("INSERT INTO event (id, pubkey, created_at, kind, raw)"
-                      " VALUES ($1, $2, $3, $4, $5)"
-                      " ON CONFLICT (id) DO NOTHING", 5, vals);
+    const char *vals[7] = {id, pubkey, cbuf, kbuf, tags_json, content, sig};
+    PGresult *r = run("INSERT INTO event"
+                      " (id, pubkey, created_at, kind, tags, content, sig)"
+                      " VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)"
+                      " ON CONFLICT (id) DO NOTHING", 7, vals);
     if (r == NULL) {
       res = STORE_ERROR;
     } else {
@@ -376,7 +382,7 @@ build_where(struct buf *b, const cJSON *filter, int *limit, bool *none) {
       }
       /* the event is stored whole in `raw`, so pull content back out rather
        * than matching the serialized form and hitting ids and tags too */
-      buf_add(b, " AND to_tsvector('simple', raw::jsonb->>'content')"
+      buf_add(b, " AND to_tsvector('simple', content)"
                  " @@ plainto_tsquery('simple', ");
       buf_addq(b, f->valuestring);
       buf_add(b, ")");
@@ -421,7 +427,8 @@ db_query_try(const cJSON *filter,
     pthread_mutex_unlock(&g_mutex);
     return false;
   }
-  buf_add(&b, "SELECT id, raw FROM event WHERE TRUE");
+  buf_add(&b, "SELECT id, pubkey, created_at, kind, tags::text, content, sig"
+              " FROM event WHERE TRUE");
   build_where(&b, filter, &limit, &none);
   buf_addf(&b, " ORDER BY created_at DESC, id ASC LIMIT %d", limit);
 
@@ -442,7 +449,10 @@ db_query_try(const cJSON *filter,
           cap = ncap;
         }
         rows[nrows].id = strdup(PQgetvalue(r, i, 0));
-        rows[nrows].raw = strdup(PQgetvalue(r, i, 1));
+        rows[nrows].raw = nostr_event_serialize(
+            PQgetvalue(r, i, 0), PQgetvalue(r, i, 1),
+            atoll(PQgetvalue(r, i, 2)), atoi(PQgetvalue(r, i, 3)),
+            PQgetvalue(r, i, 4), PQgetvalue(r, i, 5), PQgetvalue(r, i, 6));
         if (rows[nrows].id == NULL || rows[nrows].raw == NULL) {
           free(rows[nrows].id);
           free(rows[nrows].raw);
@@ -504,10 +514,14 @@ db_count_try(const cJSON *filter, long long *out) {
  * first operation after an outage always errors out.  Retry it once:
  * ensure_conn() reconnects at the start of the second attempt. */
 static store_result
-db_event(const cJSON *ev, const char *raw) {
-  store_result res = db_event_try(ev, raw);
+db_event(const cJSON *ev) {
+  char *tags_json = cJSON_PrintUnformatted(field(ev, "tags"));
+  store_result res;
+  if (tags_json == NULL) return STORE_ERROR;
+  res = db_event_try(ev, tags_json);
   if (res == STORE_ERROR && PQstatus(g_conn) != CONNECTION_OK)
-    res = db_event_try(ev, raw);
+    res = db_event_try(ev, tags_json);
+  free(tags_json);
   return res;
 }
 

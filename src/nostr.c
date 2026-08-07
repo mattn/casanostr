@@ -75,6 +75,56 @@ nostr_event_canonical(const cJSON *ev) {
   return s;
 }
 
+/* The stored form: the seven NIP-01 fields in a fixed order, built from the
+ * event rather than echoed from the wire. Reads rebuild the same shape from
+ * their columns, so a client sees one serialization either way. */
+char *
+nostr_event_serialize(const char *id, const char *pubkey, long long created_at,
+                      int kind, const char *tags_json, const char *content,
+                      const char *sig) {
+  cJSON *o = cJSON_CreateObject();
+  cJSON *tags;
+  char *s;
+
+  if (o == NULL) return NULL;
+  tags = cJSON_Parse(tags_json != NULL ? tags_json : "[]");
+  if (tags == NULL || !cJSON_IsArray(tags)) {
+    cJSON_Delete(tags);
+    tags = cJSON_CreateArray();
+  }
+  cJSON_AddStringToObject(o, "id", id);
+  cJSON_AddStringToObject(o, "pubkey", pubkey);
+  cJSON_AddNumberToObject(o, "created_at", (double)created_at);
+  cJSON_AddNumberToObject(o, "kind", kind);
+  cJSON_AddItemToObject(o, "tags", tags);
+  cJSON_AddStringToObject(o, "content", content != NULL ? content : "");
+  cJSON_AddStringToObject(o, "sig", sig);
+  s = cJSON_PrintUnformatted(o);
+  cJSON_Delete(o);
+  return s;
+}
+
+char *
+nostr_event_json(const cJSON *ev) {
+  const cJSON *id = field(ev, "id"), *pubkey = field(ev, "pubkey");
+  const cJSON *created_at = field(ev, "created_at"), *kind = field(ev, "kind");
+  const cJSON *tags = field(ev, "tags"), *content = field(ev, "content");
+  const cJSON *sig = field(ev, "sig");
+  char *tags_json, *out;
+
+  if (!cJSON_IsString(id) || !cJSON_IsString(pubkey) ||
+      !cJSON_IsNumber(created_at) || !cJSON_IsNumber(kind) ||
+      !cJSON_IsString(content) || !cJSON_IsString(sig))
+    return NULL;
+  tags_json = cJSON_PrintUnformatted((cJSON *)tags);
+  out = nostr_event_serialize(id->valuestring, pubkey->valuestring,
+                              (long long)created_at->valuedouble,
+                              (int)kind->valuedouble, tags_json,
+                              content->valuestring, sig->valuestring);
+  free(tags_json);
+  return out;
+}
+
 bool
 nostr_event_id(const cJSON *ev, char *id_hex) {
   char *s = nostr_event_canonical(ev);

@@ -17,7 +17,9 @@ static const char *schema =
     "  pubkey TEXT NOT NULL,"
     "  created_at INTEGER NOT NULL,"
     "  kind INTEGER NOT NULL,"
-    "  raw TEXT NOT NULL"
+    "  tags TEXT NOT NULL,"
+    "  content TEXT NOT NULL,"
+    "  sig TEXT NOT NULL"
     ");"
     "CREATE TABLE IF NOT EXISTS tag ("
     "  event_id TEXT NOT NULL,"
@@ -196,28 +198,36 @@ insert_tags(const cJSON *ev, const char *id, bool addressable) {
 }
 
 static store_result
-db_event(const cJSON *ev, const char *raw) {
+db_event(const cJSON *ev) {
   const cJSON *jid = field(ev, "id"), *jpk = field(ev, "pubkey");
   const cJSON *jca = field(ev, "created_at"), *jk = field(ev, "kind");
-  const char *id, *pubkey;
+  const cJSON *jc = field(ev, "content"), *js = field(ev, "sig");
+  const char *id, *pubkey, *content, *sig;
+  char *tags_json;
   long long created_at;
   int kind;
   bool addressable = false;
   store_result res = STORE_NEW;
 
   if (!cJSON_IsString(jid) || !cJSON_IsString(jpk) || !cJSON_IsNumber(jca) ||
-      !cJSON_IsNumber(jk))
+      !cJSON_IsNumber(jk) || !cJSON_IsString(jc) || !cJSON_IsString(js))
     return STORE_ERROR;
   id = jid->valuestring;
   pubkey = jpk->valuestring;
+  content = jc->valuestring;
+  sig = js->valuestring;
   created_at = (long long)jca->valuedouble;
   kind = (int)jk->valuedouble;
 
   if (kind >= 20000 && kind < 30000) return STORE_EPHEMERAL;
 
+  tags_json = cJSON_PrintUnformatted(field(ev, "tags"));
+  if (tags_json == NULL) return STORE_ERROR;
+
   pthread_mutex_lock(&g_mutex);
   if (!execf("BEGIN IMMEDIATE")) {
     pthread_mutex_unlock(&g_mutex);
+    free(tags_json);
     return STORE_ERROR;
   }
 
@@ -239,9 +249,10 @@ db_event(const cJSON *ev, const char *raw) {
   }
 
   if (res == STORE_NEW) {
-    if (!execf("INSERT OR IGNORE INTO event (id, pubkey, created_at, kind, raw)"
-               " VALUES (%Q, %Q, %lld, %d, %Q)",
-               id, pubkey, created_at, kind, raw)) {
+    if (!execf("INSERT OR IGNORE INTO event"
+               " (id, pubkey, created_at, kind, tags, content, sig)"
+               " VALUES (%Q, %Q, %lld, %d, %Q, %Q, %Q)",
+               id, pubkey, created_at, kind, tags_json, content, sig)) {
       res = STORE_ERROR;
     } else if (sqlite3_changes(g_db) == 0) {
       res = STORE_DUPLICATE;
@@ -258,6 +269,7 @@ db_event(const cJSON *ev, const char *raw) {
    * without putting the new one in its place */
   execf(res == STORE_ERROR ? "ROLLBACK" : "COMMIT");
   pthread_mutex_unlock(&g_mutex);
+  free(tags_json);
   return res;
 }
 
@@ -313,12 +325,7 @@ build_where(sqlite3_str *s, const cJSON *filter, int *limit, bool *none) {
         *none = true;
         continue;
       }
-      /* the event is stored whole in `raw`, so pull content back out rather
-       * than matching the serialized form and hitting ids and tags too */
-      sqlite3_str_appendf(s,
-                          " AND json_extract(raw, '$.content') LIKE %Q"
-                          " ESCAPE '\\'",
-                          pat);
+      sqlite3_str_appendf(s, " AND content LIKE %Q ESCAPE '\\'", pat);
       free(pat);
     } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
       double v = f->valuedouble;
@@ -356,7 +363,9 @@ db_query(const cJSON *filter,
 
   pthread_mutex_lock(&g_mutex);
   s = sqlite3_str_new(g_db);
-  sqlite3_str_appendall(s, "SELECT id, raw FROM event WHERE 1");
+  sqlite3_str_appendall(
+      s, "SELECT id, pubkey, created_at, kind, tags, content, sig"
+         " FROM event WHERE 1");
   build_where(s, filter, &limit, &none);
   sqlite3_str_appendf(s, " ORDER BY created_at DESC, id ASC LIMIT %d", limit);
   sql = sqlite3_str_finish(s);
@@ -370,8 +379,17 @@ db_query(const cJSON *filter,
     } else {
       while (sqlite3_step(st) == SQLITE_ROW) {
         const char *id = (const char *)sqlite3_column_text(st, 0);
-        const char *raw = (const char *)sqlite3_column_text(st, 1);
-        if (id == NULL || raw == NULL) continue;
+        const char *pubkey = (const char *)sqlite3_column_text(st, 1);
+        long long created_at = sqlite3_column_int64(st, 2);
+        int kind = sqlite3_column_int(st, 3);
+        const char *tags = (const char *)sqlite3_column_text(st, 4);
+        const char *content = (const char *)sqlite3_column_text(st, 5);
+        const char *sig = (const char *)sqlite3_column_text(st, 6);
+        char *raw;
+        if (id == NULL || pubkey == NULL || sig == NULL) continue;
+        raw = nostr_event_serialize(id, pubkey, created_at, kind, tags,
+                                    content, sig);
+        if (raw == NULL) continue;
         if (nrows == cap) {
           int ncap = cap ? cap * 2 : 64;
           struct row *nr = realloc(rows, sizeof(struct row) * ncap);
@@ -380,10 +398,9 @@ db_query(const cJSON *filter,
           cap = ncap;
         }
         rows[nrows].id = strdup(id);
-        rows[nrows].raw = strdup(raw);
-        if (rows[nrows].id == NULL || rows[nrows].raw == NULL) {
-          free(rows[nrows].id);
-          free(rows[nrows].raw);
+        rows[nrows].raw = raw; /* already owned */
+        if (rows[nrows].id == NULL) {
+          free(raw);
           ok = false;
           break;
         }

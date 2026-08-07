@@ -367,12 +367,14 @@ process_event(struct client *c, const cJSON *msg) {
       return;
     }
   }
-  raw = cJSON_PrintUnformatted((cJSON *)ev);
+  /* the same shape a stored row rebuilds into, so live delivery and a
+   * later query hand the client identical bytes */
+  raw = nostr_event_json(ev);
   if (raw == NULL) {
     send_ok(c->conn, id, false, "error: out of memory");
     return;
   }
-  r = store_event(ev, raw);
+  r = store_event(ev);
   switch (r) {
   case STORE_DUPLICATE:
     send_ok(c->conn, id, true, "duplicate: already have this event");
