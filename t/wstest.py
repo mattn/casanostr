@@ -166,6 +166,26 @@ def main():
     assert r[0] == "EOSE" and r[1] == "s2", r
     print("tag filter: ok")
 
+    # a limit of zero asks for no stored events, unlike an unset limit
+    jsend(a, ["REQ", "s2a", {"limit": 0}])
+    r = jrecv(a)
+    assert r[0] == "EOSE" and r[1] == "s2a", ("limit 0 returned events", r)
+    print("limit zero: ok")
+
+    # only single-letter keys are tag filters; a longer one is an unknown key
+    # and must be ignored rather than silently matching nothing
+    jsend(a, ["REQ", "s2b", {"#nonsense": ["casanostr"]}])
+    r = jrecv(a)
+    assert r[0] == "EVENT" and r[1] == "s2b", ("unknown key was not ignored", r)
+    while r[0] == "EVENT":
+        r = jrecv(a)
+    assert r[0] == "EOSE" and r[1] == "s2b", r
+    print("multi-letter tag key ignored: ok")
+
+    # both match everything live, so drop them before the checks below
+    jsend(a, ["CLOSE", "s2a"])
+    jsend(a, ["CLOSE", "s2b"])
+
     meta_old, meta_new, del_target, del_ev = (
         json.loads(x) for x in sys.argv[5:9]
     )

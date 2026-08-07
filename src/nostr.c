@@ -192,7 +192,7 @@ nostr_filter_match(const cJSON *filter, const cJSON *ev) {
     } else if (strcmp(key, "until") == 0) {
       if (!cJSON_IsNumber(f) || !cJSON_IsNumber(created_at) ||
           created_at->valuedouble > f->valuedouble) return false;
-    } else if (key[0] == '#' && key[1] != '\0') {
+    } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
       const char *name = key + 1;
       const cJSON *t;
       bool found = false;
