@@ -134,6 +134,13 @@ def main():
     assert r[0] == "EOSE" and r[1] == "s1", r
     print("req/eose: ok")
 
+    # a subscriber that vanishes without CLOSE leaves the broadcast holding a
+    # reference to it; delivery to the remaining subscribers must still work
+    gone = WS("127.0.0.1", port)
+    jsend(gone, ["REQ", "sx", {}])
+    jrecv(gone)  # EOSE
+    gone.sock.close()
+
     # live: publish ev2 on another connection, subscription s1 receives it
     b = WS("127.0.0.1", port)
     jsend(b, ["EVENT", ev2])

@@ -32,11 +32,13 @@ struct client {
   struct sub *subs;
   char *buf; /* websocket message reassembly */
   size_t len;
+  int refs; /* broadcasts currently writing to this connection */
   struct client *next;
 };
 
 static struct client *g_clients;
 static pthread_mutex_t g_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_clients_idle = PTHREAD_COND_INITIALIZER;
 static volatile sig_atomic_t g_stop;
 
 /* --- senders ------------------------------------------------------------ */
@@ -174,16 +176,48 @@ client_del_sub(struct client *c, const char *subid) {
   pthread_mutex_unlock(&g_clients_mutex);
 }
 
+/* A websocket write blocks until the peer accepts the data, so the
+ * recipients are collected under the lock and written to without it —
+ * otherwise one client that stops reading stalls every other connection.
+ * A reference on each recipient keeps its close handler waiting until the
+ * write finishes, since civetweb frees the connection once that returns. */
 static void
 broadcast_event(const cJSON *ev, const char *raw) {
+  struct target {
+    struct client *c;
+    char subid[65];
+  } *targets = NULL;
+  size_t n = 0, cap = 0, i;
   struct client *c;
   struct sub *s;
+
   pthread_mutex_lock(&g_clients_mutex);
-  for (c = g_clients; c != NULL; c = c->next)
-    for (s = c->subs; s != NULL; s = s->next)
-      if (nostr_filters_match(s->filters, ev))
-        send_stored_event(c->conn, s->id, raw);
+  for (c = g_clients; c != NULL; c = c->next) {
+    for (s = c->subs; s != NULL; s = s->next) {
+      if (!nostr_filters_match(s->filters, ev)) continue;
+      if (n == cap) {
+        size_t ncap = cap != 0 ? cap * 2 : 16;
+        struct target *nt = realloc(targets, ncap * sizeof *nt);
+        if (nt == NULL) goto deliver; /* send to whoever we collected */
+        targets = nt;
+        cap = ncap;
+      }
+      targets[n].c = c;
+      snprintf(targets[n].subid, sizeof targets[n].subid, "%s", s->id);
+      c->refs++;
+      n++;
+    }
+  }
+deliver:
   pthread_mutex_unlock(&g_clients_mutex);
+
+  for (i = 0; i < n; i++) {
+    send_stored_event(targets[i].c->conn, targets[i].subid, raw);
+    pthread_mutex_lock(&g_clients_mutex);
+    if (--targets[i].c->refs == 0) pthread_cond_broadcast(&g_clients_idle);
+    pthread_mutex_unlock(&g_clients_mutex);
+  }
+  free(targets);
 }
 
 /* --- message handling --------------------------------------------------- */
@@ -387,6 +421,9 @@ ws_close_handler(const struct mg_connection *conn, void *ud) {
       break;
     }
   }
+  /* unlinked, so no further broadcast can pick this client up; wait for the
+   * ones already writing to it before civetweb reclaims the connection */
+  while (c->refs > 0) pthread_cond_wait(&g_clients_idle, &g_clients_mutex);
   pthread_mutex_unlock(&g_clients_mutex);
   while (c->subs != NULL) {
     struct sub *s = c->subs;
