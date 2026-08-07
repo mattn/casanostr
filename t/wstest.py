@@ -114,6 +114,19 @@ def jrecv(ws):
         return m
 
 
+def jrecv_for(ws, subid):
+    """Next EVENT/EOSE/CLOSED for one subscription, skipping other traffic.
+
+    A connection can still be receiving live events for an earlier
+    subscription, so the next frame is not necessarily the answer.
+    """
+    while True:
+        m = jrecv(ws)
+        if m[0] in ("EVENT", "EOSE", "CLOSED") and m[1] != subid:
+            continue
+        return m
+
+
 def main():
     port = int(sys.argv[1])
     ev1, ev2, bad = (json.loads(a) for a in sys.argv[2:5])
@@ -360,6 +373,93 @@ def main():
     r = jrecv(a)
     assert r[0] == "EOSE" and r[1] == "s7", ("wildcard leaked into LIKE", r)
     print("nip-50 search: ok")
+
+    # NIP-17/59: a gift wrap only reaches an authenticated recipient
+    recipient_sk = os.urandom(32).hex()
+    recipient = json.loads(subprocess.run(
+        [gen_event, "-s", recipient_sk, "-k", "1", "-c", "who am i"],
+        capture_output=True, text=True, check=True).stdout)["pubkey"]
+    wrap = json.loads(subprocess.run(
+        [gen_event, "-s", sk, "-k", "1059", "-c", "sealed",
+         "-t", "p=" + recipient],
+        capture_output=True, text=True, check=True).stdout)
+    jsend(a, ["EVENT", wrap])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is True, r
+
+    # an unauthenticated connection must not see it
+    g = WS("127.0.0.1", port)
+    jsend(g, ["REQ", "gw", {"kinds": [1059]}])
+    r = jrecv_for(g, "gw")
+    assert r[0] == "EOSE", ("gift wrap served without auth", r)
+
+    # nor must someone authenticated as the wrong pubkey (d is the author).
+    # d still holds the match-everything subscription from the auth test.
+    jsend(d, ["CLOSE", "wake"])
+    jsend(d, ["REQ", "gw2", {"kinds": [1059]}])
+    r = jrecv_for(d, "gw2")
+    assert r[0] == "EOSE", ("gift wrap served to a non-recipient", r)
+
+    # the recipient authenticates and does see it
+    h = WS("127.0.0.1", port)
+    jsend(h, ["REQ", "wake", {"limit": 0}])
+    jrecv(h)
+    ra = subprocess.run(
+        [gen_event, "-s", recipient_sk, "-k", "22242", "-c", "",
+         "-t", "challenge=" + h.challenge,
+         "-t", "relay=ws://127.0.0.1:%d" % port],
+        capture_output=True, text=True, check=True).stdout
+    jsend(h, ["AUTH", json.loads(ra)])
+    r = jrecv(h)
+    assert r[0] == "OK" and r[2] is True, r
+    jsend(h, ["REQ", "gw3", {"kinds": [1059]}])
+    r = jrecv_for(h, "gw3")
+    assert r[0] == "EVENT" and r[2]["id"] == wrap["id"], \
+        ("recipient could not read the gift wrap", r)
+    print("nip-17/59 gift wrap: ok")
+
+    # NIP-62: a vanish request aimed at this relay drops the author's events
+    v_sk = os.urandom(32).hex()
+    for i in range(2):
+        e = json.loads(subprocess.run(
+            [gen_event, "-s", v_sk, "-k", "1", "-c", "to vanish %d" % i],
+            capture_output=True, text=True, check=True).stdout)
+        jsend(a, ["EVENT", e])
+        r = jrecv(a)
+        assert r[0] == "OK" and r[2] is True, r
+    author = e["pubkey"]
+
+    # aimed at some other relay: nothing happens here
+    elsewhere = json.loads(subprocess.run(
+        [gen_event, "-s", v_sk, "-k", "62", "-c", "",
+         "-t", "relay=wss://somewhere.example"],
+        capture_output=True, text=True, check=True).stdout)
+    jsend(a, ["EVENT", elsewhere])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is True, r
+    jsend(a, ["REQ", "v1", {"authors": [author], "kinds": [1]}])
+    seen = 0
+    r = jrecv_for(a, "v1")
+    while r[0] == "EVENT":
+        seen += 1
+        r = jrecv_for(a, "v1")
+    assert seen == 2, ("a request for another relay vanished events", seen)
+
+    # aimed at us: the kind-1 events go, the request itself stays
+    ours = json.loads(subprocess.run(
+        [gen_event, "-s", v_sk, "-k", "62", "-c", "",
+         "-t", "relay=ws://127.0.0.1:%d/" % port],
+        capture_output=True, text=True, check=True).stdout)
+    jsend(a, ["EVENT", ours])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is True, r
+    jsend(a, ["REQ", "v2", {"authors": [author], "kinds": [1]}])
+    r = jrecv_for(a, "v2")
+    assert r[0] == "EOSE", ("events survived the vanish request", r)
+    jsend(a, ["REQ", "v3", {"authors": [author], "kinds": [62]}])
+    r = jrecv_for(a, "v3")
+    assert r[0] == "EVENT", ("the vanish request deleted itself", r)
+    print("nip-62 vanish: ok")
 
     print("wstest: all assertions passed")
 

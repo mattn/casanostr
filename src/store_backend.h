@@ -12,6 +12,9 @@ struct store_backend {
                 int (*emit)(const char *id, const char *raw, void *ud),
                 void *ud);
   bool (*count)(const cJSON *filter, long long *out);
+  /* NIP-62: drop everything this pubkey published up to and including
+   * `until`, except the vanish requests themselves. */
+  bool (*vanish)(const char *pubkey, long long until);
 };
 
 void store_backend_sqlite3(struct store_backend *be);

@@ -62,3 +62,8 @@ bool
 store_count(const cJSON *filter, long long *out) {
   return g_be.count(filter, out);
 }
+
+bool
+store_vanish(const char *pubkey, long long until) {
+  return g_be.vanish(pubkey, until);
+}
