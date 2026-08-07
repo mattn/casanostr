@@ -41,7 +41,9 @@ struct client {
   struct sub *subs;
   char *buf; /* websocket message reassembly */
   size_t len;
-  int refs; /* broadcasts currently writing to this connection */
+  int refs;           /* broadcasts currently writing to this connection */
+  char challenge[33]; /* NIP-42 challenge, sent once the connection is up */
+  char authed[65];    /* NIP-42 authenticated pubkey; empty until AUTH */
   struct client *next;
 };
 
@@ -91,6 +93,37 @@ send_closed(struct mg_connection *conn, const char *subid, const char *msg) {
   cJSON_AddItemToArray(j, cJSON_CreateString("CLOSED"));
   cJSON_AddItemToArray(j, cJSON_CreateString(subid));
   cJSON_AddItemToArray(j, cJSON_CreateString(msg));
+  send_json(conn, j);
+}
+
+/* NIP-42: a challenge only has to be unpredictable and single-use, so take
+ * it straight from the system CSPRNG and hex-encode it. */
+static void
+make_challenge(char *out, size_t outlen) {
+  static const char hex[] = "0123456789abcdef";
+  unsigned char buf[16];
+  FILE *fp = fopen("/dev/urandom", "rb");
+  size_t i, n = (outlen - 1) / 2;
+  if (n > sizeof buf) n = sizeof buf;
+  if (fp == NULL || fread(buf, 1, n, fp) != n) {
+    /* no entropy source: fall back to something merely unique so the
+     * connection still works, and let AUTH be best effort */
+    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rand() >> 7);
+  }
+  if (fp != NULL) fclose(fp);
+  for (i = 0; i < n; i++) {
+    out[i * 2] = hex[buf[i] >> 4];
+    out[i * 2 + 1] = hex[buf[i] & 0x0f];
+  }
+  out[n * 2] = '\0';
+}
+
+/* NIP-42: ["AUTH","<challenge>"] */
+static void
+send_auth(struct mg_connection *conn, const char *challenge) {
+  cJSON *j = cJSON_CreateArray();
+  cJSON_AddItemToArray(j, cJSON_CreateString("AUTH"));
+  cJSON_AddItemToArray(j, cJSON_CreateString(challenge));
   send_json(conn, j);
 }
 
@@ -423,6 +456,71 @@ process_count(struct client *c, const cJSON *msg) {
   send_json(c->conn, j);
 }
 
+/* NIP-42: the client answers our challenge with a kind 22242 event whose
+ * "challenge" tag is the one we sent and whose "relay" tag names this relay.
+ * The signature is checked by nostr_event_validate like any other event, so
+ * all that is left is to bind it to this connection. */
+static void
+process_auth(struct client *c, const cJSON *msg) {
+  const cJSON *ev = cJSON_GetArrayItem((cJSON *)msg, 1);
+  const cJSON *jid, *kind, *tags, *t, *pubkey, *created_at;
+  const char *challenge = NULL, *relay = NULL;
+  const char *err;
+  const char *id = "";
+  double now, ts;
+
+  jid = ev != NULL ? cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "id") : NULL;
+  if (cJSON_IsString(jid)) id = jid->valuestring;
+
+  err = nostr_event_validate(ev);
+  if (err != NULL) {
+    send_ok(c->conn, id, false, err);
+    return;
+  }
+  kind = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "kind");
+  if (!cJSON_IsNumber(kind) || (int)kind->valuedouble != 22242) {
+    send_ok(c->conn, id, false, "invalid: auth event must be kind 22242");
+    return;
+  }
+  /* the challenge is single-use and short lived; 10 minutes is the window
+   * other relays settled on */
+  created_at = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "created_at");
+  now = (double)time(NULL);
+  ts = cJSON_IsNumber(created_at) ? created_at->valuedouble : 0;
+  if (ts < now - 600 || ts > now + CREATED_AT_UPPER_LIMIT) {
+    send_ok(c->conn, id, false, "invalid: auth event is not recent");
+    return;
+  }
+  tags = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "tags");
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn, *tv;
+    if (!cJSON_IsArray(t)) continue;
+    tn = t->child;
+    tv = tn != NULL ? tn->next : NULL;
+    if (!cJSON_IsString(tn) || !cJSON_IsString(tv)) continue;
+    if (challenge == NULL && strcmp(tn->valuestring, "challenge") == 0)
+      challenge = tv->valuestring;
+    else if (relay == NULL && strcmp(tn->valuestring, "relay") == 0)
+      relay = tv->valuestring;
+  }
+  if (challenge == NULL || c->challenge[0] == '\0' ||
+      strcmp(challenge, c->challenge) != 0) {
+    send_ok(c->conn, id, false, "invalid: challenge does not match");
+    return;
+  }
+  if (relay == NULL) {
+    send_ok(c->conn, id, false, "invalid: auth event has no relay tag");
+    return;
+  }
+  pubkey = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "pubkey");
+  pthread_mutex_lock(&g_clients_mutex);
+  snprintf(c->authed, sizeof c->authed, "%s", pubkey->valuestring);
+  /* burn the challenge so the same auth event cannot be replayed here */
+  c->challenge[0] = '\0';
+  pthread_mutex_unlock(&g_clients_mutex);
+  send_ok(c->conn, id, true, "");
+}
+
 static void
 process_message(struct client *c, const char *data, size_t len) {
   cJSON *msg = cJSON_ParseWithLength(data, len);
@@ -442,6 +540,8 @@ process_message(struct client *c, const char *data, size_t len) {
     process_req(c, msg);
   } else if (strcmp(cmd->valuestring, "COUNT") == 0) {
     process_count(c, msg);
+  } else if (strcmp(cmd->valuestring, "AUTH") == 0) {
+    process_auth(c, msg);
   } else if (strcmp(cmd->valuestring, "CLOSE") == 0) {
     const cJSON *jsid = cJSON_GetArrayItem(msg, 1);
     if (cJSON_IsString(jsid) && valid_subid(jsid->valuestring))
@@ -470,8 +570,13 @@ ws_connect_handler(const struct mg_connection *conn, void *ud) {
 
 static void
 ws_ready_handler(struct mg_connection *conn, void *ud) {
-  (void)conn;
+  struct client *c = mg_get_user_connection_data(conn);
   (void)ud;
+  if (c == NULL) return;
+  /* NIP-42: offer a challenge up front so a client that wants to identify
+   * itself can do so without waiting to be asked */
+  make_challenge(c->challenge, sizeof c->challenge);
+  send_auth(conn, c->challenge);
 }
 
 static int
@@ -556,7 +661,7 @@ http_handler(struct mg_connection *conn, void *ud) {
     /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
      * relay-side work beyond NIP-01 storage semantics, which are in. */
     static const int nips[] = {1, 2, 4, 9, 11, 12, 15, 16,
-                               20, 22, 28, 33, 40, 45};
+                               20, 22, 28, 33, 40, 42, 45};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;

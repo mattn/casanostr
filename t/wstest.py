@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -101,7 +102,16 @@ def jsend(ws, obj):
 
 
 def jrecv(ws):
-    return json.loads(ws.recv_text())
+    """Next message, skipping the NIP-42 challenge the relay sends on connect.
+
+    The challenge is kept on the connection so the auth test can answer it.
+    """
+    while True:
+        m = json.loads(ws.recv_text())
+        if m[0] == "AUTH":
+            ws.challenge = m[1]
+            continue
+        return m
 
 
 def main():
@@ -258,6 +268,37 @@ def main():
     r = jrecv(a)
     assert r[0] == "COUNT" and r[1] == "c1" and r[2]["count"] == 2, r
     print("nip-45 count: ok")
+
+    # NIP-42: the relay challenges every connection, and a kind 22242 event
+    # echoing that challenge authenticates it
+    sk, gen_event = sys.argv[12], sys.argv[13]
+    d = WS("127.0.0.1", port)
+    jsend(d, ["REQ", "wake", {"limit": 0}])
+    jrecv(d)  # EOSE; jrecv stashed the challenge on the way past
+    assert d.challenge, "relay sent no AUTH challenge"
+
+    def auth_event(challenge, relay="ws://127.0.0.1:%d" % port):
+        out = subprocess.run(
+            [gen_event, "-s", sk, "-k", "22242", "-c", "",
+             "-t", "challenge=" + challenge, "-t", "relay=" + relay],
+            capture_output=True, text=True, check=True)
+        return json.loads(out.stdout)
+
+    wrong = auth_event("0" * 32)
+    jsend(d, ["AUTH", wrong])
+    r = jrecv(d)
+    assert r[0] == "OK" and r[2] is False, ("wrong challenge was accepted", r)
+
+    good = auth_event(d.challenge)
+    jsend(d, ["AUTH", good])
+    r = jrecv(d)
+    assert r[0] == "OK" and r[2] is True, r
+
+    # the challenge is single-use, so replaying the same event must fail
+    jsend(d, ["AUTH", good])
+    r = jrecv(d)
+    assert r[0] == "OK" and r[2] is False, ("challenge was reusable", r)
+    print("nip-42 auth: ok")
 
     print("wstest: all assertions passed")
 
