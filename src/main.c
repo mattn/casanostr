@@ -832,11 +832,13 @@ http_handler(struct mg_connection *conn, void *ud) {
     return 404;
   }
   if (accept != NULL && strstr(accept, "application/nostr+json") != NULL) {
-    /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
-     * relay-side work beyond NIP-01 storage semantics, which are in. */
+    /* NIP-11 relay information document.  2/4/12/15/16/20/28/33/66 need no
+     * relay-side work beyond NIP-01 storage semantics, which are in: a
+     * monitor's 30166 is addressable and its 10166 replaceable, and both
+     * already replace and serve correctly. */
     static const int nips[] = {1,  2,  4,  9,  11, 12, 13, 15, 16, 17,
                                20, 22, 26, 28, 33, 40, 42, 45, 50, 59,
-                               62, 70};
+                               62, 66, 70};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;

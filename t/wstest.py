@@ -127,6 +127,14 @@ def jrecv_for(ws, subid):
         return m
 
 
+def jrecv_ok(ws):
+    """Next OK frame, skipping any subscription traffic still in flight."""
+    while True:
+        m = jrecv(ws)
+        if m[0] == "OK":
+            return m
+
+
 def main():
     port = int(sys.argv[1])
     ev1, ev2, bad = (json.loads(a) for a in sys.argv[2:5])
@@ -459,7 +467,51 @@ def main():
     jsend(a, ["REQ", "v3", {"authors": [author], "kinds": [62]}])
     r = jrecv_for(a, "v3")
     assert r[0] == "EVENT", ("the vanish request deleted itself", r)
+    while r[0] == "EVENT":
+        r = jrecv_for(a, "v3")
+    for sub in ("v1", "v2", "v3"):
+        jsend(a, ["CLOSE", sub])
     print("nip-62 vanish: ok")
+
+    # NIP-66: a monitor's events are ordinary addressable / replaceable ones,
+    # which is the whole of the relay-side obligation
+    m_sk = os.urandom(32).hex()
+
+    def monitor(kind, extra):
+        return json.loads(subprocess.run(
+            [gen_event, "-s", m_sk, "-k", str(kind), "-c", ""] + extra,
+            capture_output=True, text=True, check=True).stdout)
+
+    old = monitor(30166, ["-t", "d=wss://relay.example", "-T", "3000"])
+    new = monitor(30166, ["-t", "d=wss://relay.example", "-T", "4000"])
+    other = monitor(30166, ["-t", "d=wss://other.example", "-T", "4000"])
+    for e in (old, new, other):
+        jsend(a, ["EVENT", e])
+        r = jrecv_ok(a)
+        assert r[2] is True, r
+    jsend(a, ["REQ", "m1", {"kinds": [30166], "authors": [new["pubkey"]]}])
+    got = []
+    r = jrecv_for(a, "m1")
+    while r[0] == "EVENT":
+        got.append(r[2]["id"])
+        r = jrecv_for(a, "m1")
+    assert new["id"] in got and other["id"] in got, ("30166 lost", got)
+    assert old["id"] not in got, ("30166 was not replaced by d tag", got)
+
+    ann1 = monitor(10166, ["-T", "3000"])
+    ann2 = monitor(10166, ["-T", "4000"])
+    for e in (ann1, ann2):
+        jsend(a, ["EVENT", e])
+        r = jrecv_ok(a)
+        assert r[2] is True, r
+    jsend(a, ["REQ", "m2", {"kinds": [10166], "authors": [ann2["pubkey"]]}])
+    got = []
+    r = jrecv_for(a, "m2")
+    while r[0] == "EVENT":
+        got.append(r[2]["id"])
+        r = jrecv_for(a, "m2")
+    assert got == [ann2["id"]], ("10166 did not replace", got)
+    print("nip-66 monitor events: ok")
 
     print("wstest: all assertions passed")
 
