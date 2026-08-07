@@ -20,6 +20,9 @@
 
 #define MAX_MESSAGE_SIZE (512 * 1024)
 #define MAX_SUBS 32
+/* each filter costs one query on REQ and one match per stored event
+ * afterwards, so an uncapped list turns a single message into unbounded work */
+#define MAX_FILTERS 32
 
 struct sub {
   char id[65];
@@ -297,8 +300,13 @@ process_req(struct client *c, const cJSON *msg) {
   }
   subid = jsid->valuestring;
 
-  filters = cJSON_CreateArray();
   n = cJSON_GetArraySize((cJSON *)msg);
+  if (n - 2 > MAX_FILTERS) {
+    send_closed(c->conn, subid, "invalid: too many filters");
+    return;
+  }
+
+  filters = cJSON_CreateArray();
   for (i = 2; i < n; i++) {
     const cJSON *ff = cJSON_GetArrayItem((cJSON *)msg, i);
     if (!cJSON_IsObject(ff)) {

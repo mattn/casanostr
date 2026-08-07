@@ -186,6 +186,12 @@ def main():
     jsend(a, ["CLOSE", "s2a"])
     jsend(a, ["CLOSE", "s2b"])
 
+    # one message must not be able to ask for an unbounded amount of work
+    jsend(a, ["REQ", "s2c"] + [{}] * 33)
+    r = jrecv(a)
+    assert r[0] == "CLOSED" and r[1] == "s2c" and "too many" in r[2], r
+    print("filter count cap: ok")
+
     meta_old, meta_new, del_target, del_ev = (
         json.loads(x) for x in sys.argv[5:9]
     )
