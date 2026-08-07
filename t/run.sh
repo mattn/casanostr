@@ -40,4 +40,21 @@ python3 t/wstest.py "$PORT" "$EV1" "$EV2" "$BAD" \
 curl -sf -H 'Accept: application/nostr+json' "http://127.0.0.1:$PORT/" |
   grep -q '"name":"casanostr"'
 echo "nip-11: ok"
+
+# NIP-13 needs a relay that demands proof of work, so run a second one
+POW_PORT=$((PORT + 1))
+POW_DB=$(mktemp -u /tmp/casanostr-pow-XXXXXX.db)
+"$CASANOSTR" -p "$POW_PORT" -d "$POW_DB" -P 8 &
+POW_PID=$!
+pow_cleanup() {
+  kill "$POW_PID" 2>/dev/null || true
+  rm -f "$POW_DB" "$POW_DB-wal" "$POW_DB-shm"
+  cleanup
+}
+trap pow_cleanup EXIT
+sleep 1
+curl -sf -H 'Accept: application/nostr+json' "http://127.0.0.1:$POW_PORT/" |
+  grep -q '"min_pow_difficulty":8'
+python3 t/powtest.py "$POW_PORT" "$SK" "$GEN_EVENT"
+
 echo "all tests passed"

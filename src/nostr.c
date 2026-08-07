@@ -244,6 +244,25 @@ contains_string(const cJSON *arr, const char *s) {
   return false;
 }
 
+/* ASCII case-insensitive substring search, matching what sqlite's LIKE does
+ * for the stored-query side of NIP-50. */
+static bool
+contains_fold(const char *hay, const char *needle) {
+  size_t nl = strlen(needle), i;
+  if (nl == 0) return false;
+  for (; *hay != '\0'; hay++) {
+    for (i = 0; i < nl; i++) {
+      char a = hay[i], b = needle[i];
+      if (a == '\0') return false;
+      if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+      if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+      if (a != b) break;
+    }
+    if (i == nl) return true;
+  }
+  return false;
+}
+
 static bool
 contains_int(const cJSON *arr, long long v) {
   const cJSON *e;
@@ -280,6 +299,15 @@ nostr_filter_match(const cJSON *filter, const cJSON *ev) {
     } else if (strcmp(key, "until") == 0) {
       if (!cJSON_IsNumber(f) || !cJSON_IsNumber(created_at) ||
           created_at->valuedouble > f->valuedouble) return false;
+    } else if (strcmp(key, "search") == 0) {
+      /* NIP-50: the stored query is a substring match over content, so the
+       * live path has to agree or the same subscription answers differently
+       * before and after EOSE. Case folding is ASCII only, like sqlite LIKE. */
+      const cJSON *content = field(ev, "content");
+      if (!cJSON_IsString(f) || f->valuestring[0] == '\0' ||
+          !cJSON_IsString(content) ||
+          !contains_fold(content->valuestring, f->valuestring))
+        return false;
     } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
       const char *name = key + 1;
       const cJSON *t;

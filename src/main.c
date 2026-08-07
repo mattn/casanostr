@@ -30,6 +30,9 @@
  * afterwards, so an uncapped list turns a single message into unbounded work */
 #define MAX_FILTERS 32
 
+/* NIP-13: minimum proof of work demanded of incoming events; 0 disables it */
+static int g_min_pow;
+
 struct sub {
   char id[65];
   cJSON *filters; /* array of filter objects */
@@ -279,6 +282,28 @@ is_protected(const cJSON *ev) {
   return false;
 }
 
+/* NIP-13: difficulty is the number of leading zero bits of the event id.
+ * Only the id is checked; whether a nonce tag commits to the same target is
+ * the publishing client's business. */
+static int
+pow_difficulty(const char *id_hex) {
+  int bits = 0;
+  size_t i;
+  for (i = 0; i < 64; i++) {
+    int c = id_hex[i];
+    int v = c <= '9' ? c - '0' : c - 'a' + 10;
+    if (v == 0) {
+      bits += 4;
+      continue;
+    }
+    if (v < 2) bits += 3;
+    else if (v < 4) bits += 2;
+    else if (v < 8) bits += 1;
+    break;
+  }
+  return bits;
+}
+
 static void
 process_event(struct client *c, const cJSON *msg) {
   const cJSON *ev = cJSON_GetArrayItem((cJSON *)msg, 1);
@@ -310,6 +335,16 @@ process_event(struct client *c, const cJSON *msg) {
         send_ok(c->conn, id, false, "invalid: event has already expired");
         return;
       }
+    }
+  }
+  if (g_min_pow > 0) {
+    int d = pow_difficulty(id);
+    if (d < g_min_pow) {
+      char m[80];
+      snprintf(m, sizeof m, "pow: difficulty %d is less than %d", d,
+               g_min_pow);
+      send_ok(c->conn, id, false, m);
+      return;
     }
   }
   /* NIP-70: a bare ["-"] tag means only the author may publish this event,
@@ -695,8 +730,8 @@ http_handler(struct mg_connection *conn, void *ud) {
   if (accept != NULL && strstr(accept, "application/nostr+json") != NULL) {
     /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
      * relay-side work beyond NIP-01 storage semantics, which are in. */
-    static const int nips[] = {1, 2, 4, 9, 11, 12, 15, 16, 20, 22,
-                               26, 28, 33, 40, 42, 45, 70};
+    static const int nips[] = {1,  2,  4,  9,  11, 12, 13, 15, 16, 20,
+                               22, 26, 28, 33, 40, 42, 45, 50, 70};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;
@@ -713,6 +748,7 @@ http_handler(struct mg_connection *conn, void *ud) {
     cJSON_AddNumberToObject(lim, "max_filters", MAX_FILTERS);
     cJSON_AddNumberToObject(lim, "max_limit", MAX_LIMIT);
     cJSON_AddNumberToObject(lim, "max_subid_length", 64);
+    cJSON_AddNumberToObject(lim, "min_pow_difficulty", g_min_pow);
     cJSON_AddNumberToObject(lim, "created_at_upper_limit",
                             CREATED_AT_UPPER_LIMIT);
     cJSON_AddBoolToObject(lim, "auth_required", false);
@@ -802,7 +838,12 @@ main(int argc, char **argv) {
   struct mg_callbacks callbacks;
   struct mg_context *ctx;
 
-  while ((opt = getopt(argc, argv, "p:d:vh")) != -1) {
+  {
+    const char *mp = getenv("MIN_POW_DIFFICULTY");
+    if (mp != NULL) g_min_pow = atoi(mp);
+  }
+
+  while ((opt = getopt(argc, argv, "p:d:P:vh")) != -1) {
     switch (opt) {
     case 'p':
       port = atoi(optarg);
@@ -810,12 +851,16 @@ main(int argc, char **argv) {
     case 'd':
       dbpath = optarg;
       break;
+    case 'P':
+      g_min_pow = atoi(optarg);
+      break;
     case 'v':
       printf("%s %s\n", RELAY_NAME, VERSION);
       return 0;
     case 'h':
     default:
-      fprintf(stderr, "usage: %s [-p port] [-d dbfile|postgres://...]\n",
+      fprintf(stderr,
+              "usage: %s [-p port] [-d dbfile|postgres://...] [-P min-pow]\n",
               RELAY_NAME);
       return opt == 'h' ? 0 : 1;
     }
