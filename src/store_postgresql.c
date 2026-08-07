@@ -146,7 +146,7 @@ newer_exists(const char *pubkey, int kind, const char *d,
 }
 
 /* NIP-09: delete this pubkey's events referenced by "e" tags */
-static void
+static bool
 apply_deletion(const cJSON *ev, const char *pubkey) {
   const cJSON *tags = field(ev, "tags"), *t;
   for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
@@ -161,11 +161,14 @@ apply_deletion(const cJSON *ev, const char *pubkey) {
       continue;
     vals[0] = tv->valuestring;
     vals[1] = pubkey;
-    exec("DELETE FROM event WHERE id=$1 AND pubkey=$2 AND kind<>5", 2, vals);
+    if (!exec("DELETE FROM event WHERE id=$1 AND pubkey=$2 AND kind<>5",
+              2, vals))
+      return false;
   }
+  return true;
 }
 
-static void
+static bool
 insert_tags(const cJSON *ev, const char *id, bool addressable) {
   const cJSON *tags = field(ev, "tags"), *t;
   bool has_d = false;
@@ -180,16 +183,19 @@ insert_tags(const cJSON *ev, const char *id, bool addressable) {
     vals[0] = id;
     vals[1] = tn->valuestring;
     vals[2] = (tv != NULL && cJSON_IsString(tv)) ? tv->valuestring : "";
-    exec("INSERT INTO tag (event_id, name, value) VALUES ($1, $2, $3)",
-         3, vals);
+    if (!exec("INSERT INTO tag (event_id, name, value) VALUES ($1, $2, $3)",
+              3, vals))
+      return false;
     if (tn->valuestring[0] == 'd') has_d = true;
   }
   /* synthesize d="" so addressable events without a d tag are replaceable */
   if (addressable && !has_d) {
     const char *vals[1] = {id};
-    exec("INSERT INTO tag (event_id, name, value) VALUES ($1, 'd', '')",
-         1, vals);
+    if (!exec("INSERT INTO tag (event_id, name, value) VALUES ($1, 'd', '')",
+              1, vals))
+      return false;
   }
+  return true;
 }
 
 static store_result
@@ -254,9 +260,11 @@ db_event_try(const cJSON *ev, const char *raw) {
       PQclear(r);
       if (!inserted) {
         res = STORE_DUPLICATE;
-      } else {
-        insert_tags(ev, id, addressable);
-        if (kind == 5) apply_deletion(ev, pubkey);
+      } else if (!insert_tags(ev, id, addressable) ||
+                 (kind == 5 && !apply_deletion(ev, pubkey))) {
+        /* a failed statement aborts the transaction, so the event row would
+         * be dropped by the COMMIT while the client was told it was stored */
+        res = STORE_ERROR;
       }
     }
   }

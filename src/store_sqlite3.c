@@ -133,7 +133,7 @@ newer_exists(const char *pubkey, int kind, const char *d,
 }
 
 /* NIP-09: delete this pubkey's events referenced by "e" tags */
-static void
+static bool
 apply_deletion(const cJSON *ev, const char *pubkey) {
   const cJSON *tags = field(ev, "tags"), *t;
   for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
@@ -145,12 +145,14 @@ apply_deletion(const cJSON *ev, const char *pubkey) {
     tv = tn->next;
     if (tv == NULL || !cJSON_IsString(tv) || !nostr_is_hex(tv->valuestring, 64))
       continue;
-    execf("DELETE FROM event WHERE id=%Q AND pubkey=%Q AND kind<>5",
-          tv->valuestring, pubkey);
+    if (!execf("DELETE FROM event WHERE id=%Q AND pubkey=%Q AND kind<>5",
+               tv->valuestring, pubkey))
+      return false;
   }
+  return true;
 }
 
-static void
+static bool
 insert_tags(const cJSON *ev, const char *id, bool addressable) {
   const cJSON *tags = field(ev, "tags"), *t;
   bool has_d = false;
@@ -161,14 +163,17 @@ insert_tags(const cJSON *ev, const char *id, bool addressable) {
     if (tn == NULL || !cJSON_IsString(tn) || strlen(tn->valuestring) != 1)
       continue;  /* only single-letter tags are indexed (NIP-01) */
     tv = tn->next;
-    execf("INSERT INTO tag (event_id, name, value) VALUES (%Q, %Q, %Q)",
-          id, tn->valuestring,
-          (tv != NULL && cJSON_IsString(tv)) ? tv->valuestring : "");
+    if (!execf("INSERT INTO tag (event_id, name, value) VALUES (%Q, %Q, %Q)",
+               id, tn->valuestring,
+               (tv != NULL && cJSON_IsString(tv)) ? tv->valuestring : ""))
+      return false;
     if (tn->valuestring[0] == 'd') has_d = true;
   }
   /* synthesize d="" so addressable events without a d tag are replaceable */
   if (addressable && !has_d)
-    execf("INSERT INTO tag (event_id, name, value) VALUES (%Q, 'd', '')", id);
+    return execf("INSERT INTO tag (event_id, name, value) VALUES (%Q, 'd', '')",
+                 id);
+  return true;
 }
 
 static store_result
@@ -221,9 +226,11 @@ db_event(const cJSON *ev, const char *raw) {
       res = STORE_ERROR;
     } else if (sqlite3_changes(g_db) == 0) {
       res = STORE_DUPLICATE;
-    } else {
-      insert_tags(ev, id, addressable);
-      if (kind == 5) apply_deletion(ev, pubkey);
+    } else if (!insert_tags(ev, id, addressable) ||
+               (kind == 5 && !apply_deletion(ev, pubkey))) {
+      /* an event stored without its tags is unfindable by tag filters, so
+       * roll the whole thing back rather than report it as stored */
+      res = STORE_ERROR;
     }
   }
 
