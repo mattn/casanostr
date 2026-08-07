@@ -29,7 +29,11 @@ static const char *schema =
     "CREATE INDEX IF NOT EXISTS idx_event_kind_pubkey ON event(kind, pubkey);"
     "CREATE INDEX IF NOT EXISTS idx_event_pubkey ON event(pubkey);"
     "CREATE INDEX IF NOT EXISTS idx_tag_event ON tag(event_id);"
-    "CREATE INDEX IF NOT EXISTS idx_tag_name_value ON tag(name, value);";
+    "CREATE INDEX IF NOT EXISTS idx_tag_name_value ON tag(name, value);"
+    /* NIP-50: content lives inside the stored JSON, so index the extracted
+     * value rather than the serialized event */
+    "CREATE INDEX IF NOT EXISTS idx_event_content_search ON event"
+    " USING gin (to_tsvector('simple', raw::jsonb->>'content'));";
 
 /* run a parameterized statement; NULL on error (caller must PQclear) */
 static PGresult *
@@ -362,6 +366,20 @@ build_where(struct buf *b, const cJSON *filter, int *limit, bool *none) {
       buf_addf(b, " AND created_at >= %lld", (long long)f->valuedouble);
     } else if (strcmp(key, "until") == 0 && cJSON_IsNumber(f)) {
       buf_addf(b, " AND created_at <= %lld", (long long)f->valuedouble);
+    } else if (strcmp(key, "search") == 0) {
+      /* NIP-50: full text over content, which is what the GIN index in the
+       * schema covers. That index deliberately skips long content, so the
+       * same length bound has to appear here for the planner to use it. */
+      if (!cJSON_IsString(f) || f->valuestring[0] == '\0') {
+        *none = true;
+        continue;
+      }
+      /* the event is stored whole in `raw`, so pull content back out rather
+       * than matching the serialized form and hitting ids and tags too */
+      buf_add(b, " AND to_tsvector('simple', raw::jsonb->>'content')"
+                 " @@ plainto_tsquery('simple', ");
+      buf_addq(b, f->valuestring);
+      buf_add(b, ")");
     } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
       double v = f->valuedouble;
       if (v >= 0) {

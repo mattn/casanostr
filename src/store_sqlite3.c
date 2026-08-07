@@ -59,6 +59,25 @@ db_close(void) {
   g_db = NULL;
 }
 
+/* NIP-50: wrap a search string as a LIKE pattern, escaping the wildcards so
+ * a search for "100%" cannot match everything. Caller frees. */
+static char *
+like_pattern(const char *s) {
+  size_t n = strlen(s), i, j = 0;
+  char *out;
+  if (n > 4096) return NULL; /* a search term this long is not a search */
+  out = malloc(n * 2 + 3);
+  if (out == NULL) return NULL;
+  out[j++] = '%';
+  for (i = 0; i < n; i++) {
+    if (s[i] == '%' || s[i] == '_' || s[i] == '\\') out[j++] = '\\';
+    out[j++] = s[i];
+  }
+  out[j++] = '%';
+  out[j] = '\0';
+  return out;
+}
+
 static bool
 execf(const char *fmt, ...) {
   va_list ap;
@@ -281,6 +300,26 @@ build_where(sqlite3_str *s, const cJSON *filter, int *limit, bool *none) {
     } else if (strcmp(key, "until") == 0 && cJSON_IsNumber(f)) {
       sqlite3_str_appendf(s, " AND created_at <= %lld",
                           (long long)f->valuedouble);
+    } else if (strcmp(key, "search") == 0) {
+      /* NIP-50: substring match over content. sqlite's LIKE folds case for
+       * ASCII only, which is as far as this backend goes. */
+      char *pat;
+      if (!cJSON_IsString(f) || f->valuestring[0] == '\0') {
+        *none = true;
+        continue;
+      }
+      pat = like_pattern(f->valuestring);
+      if (pat == NULL) {
+        *none = true;
+        continue;
+      }
+      /* the event is stored whole in `raw`, so pull content back out rather
+       * than matching the serialized form and hitting ids and tags too */
+      sqlite3_str_appendf(s,
+                          " AND json_extract(raw, '$.content') LIKE %Q"
+                          " ESCAPE '\\'",
+                          pat);
+      free(pat);
     } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
       double v = f->valuedouble;
       if (v >= 0) {

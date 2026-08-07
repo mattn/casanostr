@@ -342,6 +342,24 @@ def main():
     r = jrecv(a)
     assert r[0] == "OK" and r[2] is False and "delegation" in r[3], r
     print("nip-26 delegation: ok")
+    # NIP-50: search matches content as a substring, case-insensitively for
+    # ASCII, and agrees between the stored query and live delivery
+    jsend(a, ["REQ", "s5", {"search": "SAYS HELLO"}])
+    r = jrecv(a)
+    assert r[0] == "EVENT" and r[2]["id"] == ev1["id"], ("search missed", r)
+    while r[0] == "EVENT":
+        r = jrecv(a)
+    assert r[0] == "EOSE" and r[1] == "s5", r
+
+    jsend(a, ["REQ", "s6", {"search": "no such words here"}])
+    r = jrecv(a)
+    assert r[0] == "EOSE" and r[1] == "s6", ("search matched too much", r)
+
+    # a search term full of LIKE wildcards must not turn into match-all
+    jsend(a, ["REQ", "s7", {"search": "%"}])
+    r = jrecv(a)
+    assert r[0] == "EOSE" and r[1] == "s7", ("wildcard leaked into LIKE", r)
+    print("nip-50 search: ok")
 
     print("wstest: all assertions passed")
 
