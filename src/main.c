@@ -284,7 +284,7 @@ static void
 process_req(struct client *c, const cJSON *msg) {
   const cJSON *jsid = cJSON_GetArrayItem((cJSON *)msg, 1);
   const char *subid;
-  cJSON *filters, *f;
+  cJSON *filters;
   struct req_ctx rc = {c, NULL, NULL, 0, 0};
   int i, n;
 
@@ -308,13 +308,30 @@ process_req(struct client *c, const cJSON *msg) {
   if (cJSON_GetArraySize(filters) == 0)
     cJSON_AddItemToArray(filters, cJSON_CreateObject());
 
+  if (!client_set_sub(c, subid, filters)) {
+    send_closed(c->conn, subid, "error: too many subscriptions");
+    return;
+  }
+
+  /* Registered before the query runs: an event stored while the query is in
+   * flight is too new for its result set but would have been too early for
+   * the subscription the other way round, and would never arrive. The query
+   * reads the caller's filters rather than the registered copy, which
+   * another thread may already have replaced or freed. A client can now see
+   * such an event twice and drops the repeat by id. */
   rc.subid = subid;
-  cJSON_ArrayForEach(f, filters) store_query(f, req_emit, &rc);
+  if (n > 2) {
+    for (i = 2; i < n; i++)
+      store_query(cJSON_GetArrayItem((cJSON *)msg, i), req_emit, &rc);
+  } else {
+    cJSON *all = cJSON_CreateObject();
+    if (all != NULL) {
+      store_query(all, req_emit, &rc);
+      cJSON_Delete(all);
+    }
+  }
   free(rc.seen);
   send_eose(c->conn, subid);
-
-  if (!client_set_sub(c, subid, filters))
-    send_closed(c->conn, subid, "error: too many subscriptions");
 }
 
 static void
