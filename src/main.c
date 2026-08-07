@@ -264,6 +264,21 @@ deliver:
 
 /* --- message handling --------------------------------------------------- */
 
+/* NIP-70: the marker is the single-element tag ["-"]; a longer tag whose
+ * first element happens to be "-" is an ordinary tag. */
+static bool
+is_protected(const cJSON *ev) {
+  const cJSON *tags = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "tags");
+  const cJSON *t;
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn;
+    if (!cJSON_IsArray(t) || cJSON_GetArraySize((cJSON *)t) != 1) continue;
+    tn = t->child;
+    if (cJSON_IsString(tn) && strcmp(tn->valuestring, "-") == 0) return true;
+  }
+  return false;
+}
+
 static void
 process_event(struct client *c, const cJSON *msg) {
   const cJSON *ev = cJSON_GetArrayItem((cJSON *)msg, 1);
@@ -295,6 +310,26 @@ process_event(struct client *c, const cJSON *msg) {
         send_ok(c->conn, id, false, "invalid: event has already expired");
         return;
       }
+    }
+  }
+  /* NIP-70: a bare ["-"] tag means only the author may publish this event,
+   * so it needs an authenticated connection belonging to that pubkey */
+  if (is_protected(ev)) {
+    const cJSON *pk = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "pubkey");
+    bool owned;
+    pthread_mutex_lock(&g_clients_mutex);
+    owned = c->authed[0] != '\0' && cJSON_IsString(pk) &&
+            strcmp(c->authed, pk->valuestring) == 0;
+    pthread_mutex_unlock(&g_clients_mutex);
+    if (!owned) {
+      /* re-offer a challenge so the client can authenticate and retry */
+      pthread_mutex_lock(&g_clients_mutex);
+      if (c->challenge[0] == '\0')
+        make_challenge(c->challenge, sizeof c->challenge);
+      pthread_mutex_unlock(&g_clients_mutex);
+      send_auth(c->conn, c->challenge);
+      send_ok(c->conn, id, false, "auth-required: this event is protected");
+      return;
     }
   }
   raw = cJSON_PrintUnformatted((cJSON *)ev);
@@ -660,8 +695,8 @@ http_handler(struct mg_connection *conn, void *ud) {
   if (accept != NULL && strstr(accept, "application/nostr+json") != NULL) {
     /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
      * relay-side work beyond NIP-01 storage semantics, which are in. */
-    static const int nips[] = {1, 2, 4, 9, 11, 12, 15, 16,
-                               20, 22, 28, 33, 40, 42, 45};
+    static const int nips[] = {1, 2, 4, 9, 11, 12, 15, 16, 20, 22,
+                               26, 28, 33, 40, 42, 45, 70};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;

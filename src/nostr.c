@@ -90,6 +90,94 @@ nostr_event_id(const cJSON *ev, char *id_hex) {
   return true;
 }
 
+/* NIP-26: does `conditions` allow this event?  Conditions are joined with
+ * "&"; several kind= conditions are alternatives, while the created_at
+ * bounds all have to hold. An unrecognised condition rejects the token
+ * rather than being ignored, so a narrower delegation is never widened. */
+static bool
+delegation_conditions_ok(const char *conditions, long long kind,
+                         long long created_at) {
+  const char *p = conditions;
+  bool kind_seen = false, kind_ok = false;
+
+  if (*p == '\0') return false;
+  while (*p != '\0') {
+    const char *end = strchr(p, '&');
+    size_t n = end != NULL ? (size_t)(end - p) : strlen(p);
+    char buf[64];
+    if (n == 0 || n >= sizeof buf) return false;
+    memcpy(buf, p, n);
+    buf[n] = '\0';
+    if (strncmp(buf, "kind=", 5) == 0) {
+      kind_seen = true;
+      if (atoll(buf + 5) == kind) kind_ok = true;
+    } else if (strncmp(buf, "created_at<", 11) == 0) {
+      if (created_at >= atoll(buf + 11)) return false;
+    } else if (strncmp(buf, "created_at>", 11) == 0) {
+      if (created_at <= atoll(buf + 11)) return false;
+    } else {
+      return false;
+    }
+    p = end != NULL ? end + 1 : p + n;
+  }
+  return !kind_seen || kind_ok;
+}
+
+/* NIP-26: a ["delegation", <delegator>, <conditions>, <sig>] tag says the
+ * delegator authorised this event's pubkey to sign on its behalf. The
+ * delegator signs sha256("nostr:delegation:<pubkey>:<conditions>"). A tag
+ * that is present but does not verify makes the whole event invalid. */
+static const char *
+check_delegation(const cJSON *ev) {
+  const cJSON *tags = field(ev, "tags"), *t;
+  const cJSON *kind = field(ev, "kind"), *created_at = field(ev, "created_at");
+  const cJSON *pubkey = field(ev, "pubkey");
+
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn, *dele, *cond, *dsig;
+    char token[256];
+    unsigned char md[EVP_MAX_MD_SIZE], pk[32], sg[64];
+    unsigned int mdlen = 0;
+    secp256k1_xonly_pubkey xpk;
+    int n;
+
+    if (!cJSON_IsArray(t) || cJSON_GetArraySize((cJSON *)t) < 4) continue;
+    tn = t->child;
+    if (!cJSON_IsString(tn) || strcmp(tn->valuestring, "delegation") != 0)
+      continue;
+    dele = tn->next;
+    cond = dele != NULL ? dele->next : NULL;
+    dsig = cond != NULL ? cond->next : NULL;
+    if (!cJSON_IsString(dele) || !cJSON_IsString(cond) || !cJSON_IsString(dsig))
+      return "invalid: malformed delegation tag";
+    if (!nostr_is_hex(dele->valuestring, 64))
+      return "invalid: delegation pubkey must be 64 lowercase hex characters";
+    if (!nostr_is_hex(dsig->valuestring, 128))
+      return "invalid: delegation sig must be 128 lowercase hex characters";
+    if (!delegation_conditions_ok(cond->valuestring,
+                                  (long long)kind->valuedouble,
+                                  (long long)created_at->valuedouble))
+      return "invalid: delegation conditions do not allow this event";
+
+    n = snprintf(token, sizeof token, "nostr:delegation:%s:%s",
+                 pubkey->valuestring, cond->valuestring);
+    if (n < 0 || (size_t)n >= sizeof token)
+      return "invalid: delegation conditions too long";
+    if (!EVP_Digest(token, (size_t)n, md, &mdlen, EVP_sha256(), NULL) ||
+        mdlen != 32)
+      return "invalid: cannot hash delegation token";
+    hex2bin(dele->valuestring, pk, sizeof pk);
+    hex2bin(dsig->valuestring, sg, sizeof sg);
+    if (!secp256k1_xonly_pubkey_parse(secp256k1_context_static, &xpk, pk))
+      return "invalid: bad delegation pubkey";
+    if (!secp256k1_schnorrsig_verify(secp256k1_context_static, sg, md, 32,
+                                     &xpk))
+      return "invalid: bad delegation signature";
+    return NULL; /* first delegation tag wins, like every other tag lookup */
+  }
+  return NULL;
+}
+
 const char *
 nostr_event_validate(const cJSON *ev) {
   const cJSON *id, *pubkey, *sig, *created_at, *kind, *tags, *content, *t, *e;
@@ -145,7 +233,7 @@ nostr_event_validate(const cJSON *ev) {
     return "invalid: bad pubkey";
   if (!secp256k1_schnorrsig_verify(secp256k1_context_static, sg, msg, sizeof msg, &xpk))
     return "invalid: bad signature";
-  return NULL;
+  return check_delegation(ev);
 }
 
 static bool
