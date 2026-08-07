@@ -17,6 +17,8 @@
 #define RELAY_NAME "casanostr"
 #define RELAY_DESCRIPTION "a nostr relay written in C"
 #define RELAY_SOFTWARE "https://github.com/mattn/casanostr"
+#define RELAY_ICON \
+  "https://raw.githubusercontent.com/mattn/casanostr/main/casanostr.png"
 
 #define MAX_MESSAGE_SIZE (512 * 1024)
 #define MAX_SUBS 32
@@ -481,6 +483,7 @@ http_handler(struct mg_connection *conn, void *ud) {
     cJSON_AddStringToObject(j, "description", RELAY_DESCRIPTION);
     cJSON_AddStringToObject(j, "software", RELAY_SOFTWARE);
     cJSON_AddStringToObject(j, "version", VERSION);
+    cJSON_AddStringToObject(j, "icon", RELAY_ICON);
     cJSON_AddItemToObject(j, "supported_nips", cJSON_CreateIntArray(nips, 3));
     s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -498,11 +501,51 @@ http_handler(struct mg_connection *conn, void *ud) {
     free(s);
   } else {
     static const char body[] =
-        RELAY_NAME " - " RELAY_DESCRIPTION "\n"
-        "connect with a nostr client via ws://\n";
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "<meta charset=\"UTF-8\"/>\n"
+        "<title>Casanostr</title>\n"
+        "<style>\n"
+        "#content {\n"
+        "  margin: 50vh auto 0;\n"
+        "  transform: translateY(-50%);\n"
+        "  padding: 15px 30px;\n"
+        "  text-align: center;\n"
+        "}\n"
+        "</style>\n"
+        "<script>\n"
+        "globalThis.addEventListener('DOMContentLoaded', () => {\n"
+        "  const u = new URL(location.href)\n"
+        "  const relayName = u.protocol.replace(/^http/, 'ws') + '//' +"
+        " u.host + u.pathname.replace(/\\/$/, '')\n"
+        "  document.querySelector('#relay-name').textContent = relayName\n"
+        "  const m = document.querySelector('#makibishi')\n"
+        "  m.setAttribute('data-content', '\xf0\x9f\xa4\x99')\n"
+        "  m.setAttribute('data-relays', 'wss://relay.nostr.band,"
+        "wss://nos.lol,wss://relay.damus.io,wss://yabu.me,"
+        "wss://casanostr.compile-error.net,wss://nostr.compile-error.net')\n"
+        "  m.setAttribute('data-allow-anonymous-reaction', true)\n"
+        "  m.setAttribute('data-url', relayName)\n"
+        "  globalThis.makibishi.initTarget(m)\n"
+        "}, false)\n"
+        "</script>\n"
+        "<script src=\"https://cdn.jsdelivr.net/npm/@nikolat/makibishi@0.2.0\">"
+        "</script>\n"
+        "</head>\n"
+        "<body>\n"
+        "<div id=\"content\">\n"
+        "<h1>Casanostr the Nostr relay server</h1>\n"
+        "<p id=\"relay-name\"></p>\n"
+        "<p><img src=\"" RELAY_ICON "\" /></p>\n"
+        "<p><a href=\"" RELAY_SOFTWARE "\">" RELAY_SOFTWARE "</a></p>\n"
+        "<p><span id=\"makibishi\"></span></p>\n"
+        "</div>\n"
+        "</body>\n"
+        "</html>\n";
     mg_printf(conn,
               "HTTP/1.1 200 OK\r\n"
-              "Content-Type: text/plain; charset=utf-8\r\n"
+              "Content-Type: text/html; charset=UTF-8\r\n"
               "Content-Length: %lu\r\n"
               "Connection: close\r\n\r\n%s",
               (unsigned long)(sizeof body - 1), body);

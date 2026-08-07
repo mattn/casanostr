@@ -2,6 +2,8 @@
 
 A [Nostr](https://github.com/nostr-protocol/nostr) relay written in C.
 
+![casanostr](casanostr.png)
+
 Named after Giacomo Casanova — a contemporary (and acquaintance) of
 Alessandro Cagliostro, after whom [cagliostr](https://github.com/mattn/cagliostr),
 the C++ sibling of this relay, is named.
@@ -60,6 +62,10 @@ Requires python3 and curl.
 MIT
 
 Bundled libraries (git submodules under `deps/`) keep their own licenses.
+
+`casanostr.png` is a portrait of Giacomo Casanova by Francesco Narici
+(18th century, public domain), via
+[Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Giacomo_Casanova_by_Francesco_Narici.jpg).
 
 ## Author
 
