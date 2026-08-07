@@ -7,3 +7,5 @@ t/gen_event
 build/
 kustomize/
 __pycache__/
+/update.sh
+/verup.sh
