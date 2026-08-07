@@ -1,7 +1,7 @@
 /* gen_event: generate a signed nostr event for testing.
  *
- *   gen_event [-s seckey_hex] [-k kind] [-c content] [-t name=value]...
- *             [-T created_at]
+ *   gen_event [-s seckey_hex] [-k kind] [-c content] [-t name[=value]]...
+ *             [-T created_at] [-d delegator_seckey_hex] [-C conditions]
  *
  * Prints the event as compact JSON on stdout. */
 #include <stdio.h>
@@ -9,6 +9,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <openssl/evp.h>
 
 #include <secp256k1.h>
 #include <secp256k1_schnorrsig.h>
@@ -47,6 +49,7 @@ urandom(unsigned char *buf, size_t n) {
 int
 main(int argc, char **argv) {
   const char *seckey_hex = NULL, *content = "hello";
+  const char *delegator_hex = NULL, *conditions = "";
   int opt, kind = 1;
   long long created_at = 0;
   cJSON *tags = cJSON_CreateArray(), *ev;
@@ -56,7 +59,7 @@ main(int argc, char **argv) {
   secp256k1_keypair kp;
   secp256k1_xonly_pubkey xpk;
 
-  while ((opt = getopt(argc, argv, "s:k:c:t:T:h")) != -1) {
+  while ((opt = getopt(argc, argv, "s:k:c:t:T:d:C:h")) != -1) {
     switch (opt) {
     case 's':
       seckey_hex = optarg;
@@ -70,13 +73,19 @@ main(int argc, char **argv) {
     case 'T':
       created_at = atoll(optarg);
       break;
+    case 'd':
+      delegator_hex = optarg;
+      break;
+    case 'C':
+      conditions = optarg;
+      break;
     case 't': {
+      /* name=value, or a bare name for a single-element tag such as ["-"] */
       char *eq = strchr(optarg, '=');
       cJSON *tag = cJSON_CreateArray();
-      if (eq == NULL) die("-t expects name=value");
-      *eq = '\0';
+      if (eq != NULL) *eq = '\0';
       cJSON_AddItemToArray(tag, cJSON_CreateString(optarg));
-      cJSON_AddItemToArray(tag, cJSON_CreateString(eq + 1));
+      if (eq != NULL) cJSON_AddItemToArray(tag, cJSON_CreateString(eq + 1));
       cJSON_AddItemToArray(tags, tag);
       break;
     }
@@ -99,6 +108,44 @@ main(int argc, char **argv) {
   if (!secp256k1_keypair_xonly_pub(ctx, &xpk, NULL, &kp)) die("keypair");
   secp256k1_xonly_pubkey_serialize(ctx, pk, &xpk);
   bin2hex(pk, sizeof pk, pk_hex);
+
+  /* NIP-26: sign nostr:delegation:<pubkey>:<conditions> with the delegator
+   * key and attach the result, so the event is signed by this key but
+   * authorised by the delegator. */
+  if (delegator_hex != NULL) {
+    unsigned char dsk[32], dpk[32], token_hash[32], dsig[64];
+    char dpk_hex[65], dsig_hex[129], token[256];
+    secp256k1_keypair dkp;
+    secp256k1_xonly_pubkey dxpk;
+    cJSON *tag;
+    unsigned int mdlen = 0;
+    int n;
+
+    if (!hex2bin(delegator_hex, dsk, sizeof dsk)) die("bad --delegator");
+    if (!secp256k1_keypair_create(ctx, &dkp, dsk)) die("bad delegator key");
+    if (!secp256k1_keypair_xonly_pub(ctx, &dxpk, NULL, &dkp)) die("keypair");
+    secp256k1_xonly_pubkey_serialize(ctx, dpk, &dxpk);
+    bin2hex(dpk, sizeof dpk, dpk_hex);
+
+    n = snprintf(token, sizeof token, "nostr:delegation:%s:%s", pk_hex,
+                 conditions);
+    if (n < 0 || (size_t)n >= sizeof token) die("conditions too long");
+    if (!EVP_Digest(token, (size_t)n, token_hash, &mdlen, EVP_sha256(),
+                    NULL) ||
+        mdlen != 32)
+      die("cannot hash delegation token");
+    urandom(aux, sizeof aux);
+    if (!secp256k1_schnorrsig_sign32(ctx, dsig, token_hash, &dkp, aux))
+      die("sign delegation");
+    bin2hex(dsig, sizeof dsig, dsig_hex);
+
+    tag = cJSON_CreateArray();
+    cJSON_AddItemToArray(tag, cJSON_CreateString("delegation"));
+    cJSON_AddItemToArray(tag, cJSON_CreateString(dpk_hex));
+    cJSON_AddItemToArray(tag, cJSON_CreateString(conditions));
+    cJSON_AddItemToArray(tag, cJSON_CreateString(dsig_hex));
+    cJSON_AddItemToArray(tags, tag);
+  }
 
   ev = cJSON_CreateObject();
   cJSON_AddStringToObject(ev, "pubkey", pk_hex);

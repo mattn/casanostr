@@ -300,6 +300,49 @@ def main():
     assert r[0] == "OK" and r[2] is False, ("challenge was reusable", r)
     print("nip-42 auth: ok")
 
+    # NIP-70: a protected event needs an authenticated connection owned by
+    # its author. d is authenticated as that author from the test above.
+    protected = json.loads(sys.argv[14])
+    e = WS("127.0.0.1", port)
+    jsend(e, ["EVENT", protected])
+    r = jrecv(e)
+    assert r[0] == "OK" and r[2] is False and r[3].startswith("auth-required"), r
+    jsend(d, ["EVENT", protected])
+    r = jrecv(d)
+    assert r[0] == "OK" and r[2] is True, ("author could not publish it", r)
+    print("nip-70 protected: ok")
+
+    # NIP-26: an event signed by a delegate carries a delegation tag signed
+    # by the delegator over nostr:delegation:<pubkey>:<conditions>
+    delegator = os.urandom(32).hex()
+
+    def delegated(conditions, kind="1"):
+        out = subprocess.run(
+            [gen_event, "-k", kind, "-c", "delegated",
+             "-d", delegator, "-C", conditions],
+            capture_output=True, text=True, check=True)
+        return json.loads(out.stdout)
+
+    ok_ev = delegated("kind=1&created_at>1000")
+    jsend(a, ["EVENT", ok_ev])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is True, r
+
+    # conditions that exclude this kind must make the whole event invalid
+    bad_kind = delegated("kind=7")
+    jsend(a, ["EVENT", bad_kind])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is False and "delegation" in r[3], r
+
+    # created_at bounds are checked too. (A tampered delegation signature is
+    # not worth asserting here: editing the tag changes the event id, so the
+    # rejection would come from the id check rather than from the delegation.)
+    expired = delegated("kind=1&created_at<1000")
+    jsend(a, ["EVENT", expired])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is False and "delegation" in r[3], r
+    print("nip-26 delegation: ok")
+
     print("wstest: all assertions passed")
 
 
