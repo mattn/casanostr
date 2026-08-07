@@ -238,8 +238,11 @@ req_emit(const char *id, const char *raw, void *ud) {
   for (i = 0; i < rc->nseen; i++)
     if (strcmp(rc->seen[i], id) == 0) return 0;
   if (rc->nseen == rc->cap) {
-    rc->cap = rc->cap ? rc->cap * 2 : 64;
-    rc->seen = realloc(rc->seen, sizeof *rc->seen * rc->cap);
+    int ncap = rc->cap ? rc->cap * 2 : 64;
+    void *ns = realloc(rc->seen, sizeof *rc->seen * ncap);
+    if (ns == NULL) return -1; /* stop the query, do not write through NULL */
+    rc->seen = ns;
+    rc->cap = ncap;
   }
   snprintf(rc->seen[rc->nseen++], sizeof *rc->seen, "%s", id);
   send_stored_event(rc->c->conn, rc->subid, raw);
@@ -419,6 +422,10 @@ http_handler(struct mg_connection *conn, void *ud) {
     cJSON_AddItemToObject(j, "supported_nips", cJSON_CreateIntArray(nips, 3));
     s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
+    if (s == NULL) {
+      mg_send_http_error(conn, 500, "%s", "out of memory");
+      return 500;
+    }
     mg_printf(conn,
               "HTTP/1.1 200 OK\r\n"
               "Content-Type: application/nostr+json\r\n"
