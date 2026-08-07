@@ -17,6 +17,16 @@ char *nostr_event_canonical(const cJSON *ev);
 /* Compute the event id into id_hex (65 bytes, lowercase hex + NUL). */
 bool nostr_event_id(const cJSON *ev, char *id_hex);
 
+/* The wire form of a stored event: the seven NIP-01 fields in a fixed
+ * order. Both build from the fields the store holds, so a row rebuilt from
+ * its columns and a freshly accepted event serialize identically.
+ * Caller must free; NULL on a malformed event. */
+char *nostr_event_serialize(const char *id, const char *pubkey,
+                            long long created_at, int kind,
+                            const char *tags_json, const char *content,
+                            const char *sig);
+char *nostr_event_json(const cJSON *ev);
+
 /* Does the event match a single filter object / any filter in an array? */
 bool nostr_filter_match(const cJSON *filter, const cJSON *ev);
 bool nostr_filters_match(const cJSON *filters, const cJSON *ev);

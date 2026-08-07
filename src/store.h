@@ -14,8 +14,8 @@ typedef enum {
 bool store_init(const char *path);
 void store_close(void);
 
-/* raw is the compact JSON serialization of ev, stored verbatim. */
-store_result store_event(const cJSON *ev, const char *raw);
+/* The event is stored as columns; the wire form is rebuilt on read. */
+store_result store_event(const cJSON *ev);
 
 /* Query stored events matching a single filter, newest first.
  * emit is called outside the internal lock; return nonzero to stop. */

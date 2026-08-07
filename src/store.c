@@ -23,8 +23,8 @@ store_close(void) {
 }
 
 store_result
-store_event(const cJSON *ev, const char *raw) {
-  return g_be.event(ev, raw);
+store_event(const cJSON *ev) {
+  return g_be.event(ev);
 }
 
 struct emit_ctx {
