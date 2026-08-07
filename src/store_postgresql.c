@@ -329,12 +329,69 @@ struct row {
   char *raw;
 };
 
+/* Append the filter's conditions to a query of the event table.  Sets
+ * *none when the filter can match nothing and *limit when the filter
+ * carries one. */
+static void
+build_where(struct buf *b, const cJSON *filter, int *limit, bool *none) {
+  const cJSON *f;
+  for (f = filter->child; f != NULL; f = f->next) {
+    const char *key = f->string;
+    const cJSON *e;
+    int n = 0;
+    if (key == NULL) continue;
+    if (strcmp(key, "ids") == 0 || strcmp(key, "authors") == 0) {
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
+      buf_addf(b, " AND %s IN (", key[0] == 'i' ? "id" : "pubkey");
+      for (e = f->child; e != NULL; e = e->next)
+        if (cJSON_IsString(e)) {
+          if (n++) buf_add(b, ",");
+          buf_addq(b, e->valuestring);
+        }
+      buf_add(b, ")");
+      if (n == 0) *none = true;
+    } else if (strcmp(key, "kinds") == 0) {
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
+      buf_add(b, " AND kind IN (");
+      for (e = f->child; e != NULL; e = e->next)
+        if (cJSON_IsNumber(e))
+          buf_addf(b, "%s%d", n++ ? "," : "", (int)e->valuedouble);
+      buf_add(b, ")");
+      if (n == 0) *none = true;
+    } else if (strcmp(key, "since") == 0 && cJSON_IsNumber(f)) {
+      buf_addf(b, " AND created_at >= %lld", (long long)f->valuedouble);
+    } else if (strcmp(key, "until") == 0 && cJSON_IsNumber(f)) {
+      buf_addf(b, " AND created_at <= %lld", (long long)f->valuedouble);
+    } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
+      double v = f->valuedouble;
+      if (v >= 0) {
+        /* clamp before the cast so a huge double stays in range; a limit of
+         * zero asks for no stored events and is not an unset limit */
+        *limit = v > 1000 ? 1000 : (int)v;
+        if (*limit == 0) *none = true;
+      }
+    } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
+      buf_add(b, " AND EXISTS (SELECT 1 FROM tag WHERE"
+                  " tag.event_id = event.id AND tag.name = ");
+      buf_addq(b, key + 1);
+      buf_add(b, " AND tag.value IN (");
+      for (e = f->child; e != NULL; e = e->next)
+        if (cJSON_IsString(e)) {
+          if (n++) buf_add(b, ",");
+          buf_addq(b, e->valuestring);
+        }
+      buf_add(b, "))");
+      if (n == 0) *none = true;
+    }
+  }
+}
+
 static bool
 db_query_try(const cJSON *filter,
-         int (*emit)(const char *id, const char *raw, void *ud),
-         void *ud) {
+             int (*emit)(const char *id, const char *raw, void *ud),
+             void *ud) {
   struct buf b = {NULL, 0, 0, false};
-  const cJSON *f;
   int limit = 500, i, nrows = 0, cap = 0;
   bool none = false, ok = true;
   struct row *rows = NULL;
@@ -347,56 +404,7 @@ db_query_try(const cJSON *filter,
     return false;
   }
   buf_add(&b, "SELECT id, raw FROM event WHERE TRUE");
-  for (f = filter->child; f != NULL; f = f->next) {
-    const char *key = f->string;
-    const cJSON *e;
-    int n = 0;
-    if (key == NULL) continue;
-    if (strcmp(key, "ids") == 0 || strcmp(key, "authors") == 0) {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
-      buf_addf(&b, " AND %s IN (", key[0] == 'i' ? "id" : "pubkey");
-      for (e = f->child; e != NULL; e = e->next)
-        if (cJSON_IsString(e)) {
-          if (n++) buf_add(&b, ",");
-          buf_addq(&b, e->valuestring);
-        }
-      buf_add(&b, ")");
-      if (n == 0) none = true;
-    } else if (strcmp(key, "kinds") == 0) {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
-      buf_add(&b, " AND kind IN (");
-      for (e = f->child; e != NULL; e = e->next)
-        if (cJSON_IsNumber(e))
-          buf_addf(&b, "%s%d", n++ ? "," : "", (int)e->valuedouble);
-      buf_add(&b, ")");
-      if (n == 0) none = true;
-    } else if (strcmp(key, "since") == 0 && cJSON_IsNumber(f)) {
-      buf_addf(&b, " AND created_at >= %lld", (long long)f->valuedouble);
-    } else if (strcmp(key, "until") == 0 && cJSON_IsNumber(f)) {
-      buf_addf(&b, " AND created_at <= %lld", (long long)f->valuedouble);
-    } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
-      double v = f->valuedouble;
-      if (v >= 0) {
-        /* clamp before the cast so a huge double stays in range; a limit of
-         * zero asks for no stored events and is not an unset limit */
-        limit = v > 1000 ? 1000 : (int)v;
-        if (limit == 0) none = true;
-      }
-    } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
-      buf_add(&b, " AND EXISTS (SELECT 1 FROM tag WHERE"
-                  " tag.event_id = event.id AND tag.name = ");
-      buf_addq(&b, key + 1);
-      buf_add(&b, " AND tag.value IN (");
-      for (e = f->child; e != NULL; e = e->next)
-        if (cJSON_IsString(e)) {
-          if (n++) buf_add(&b, ",");
-          buf_addq(&b, e->valuestring);
-        }
-      buf_add(&b, "))");
-      if (n == 0) none = true;
-    }
-  }
+  build_where(&b, filter, &limit, &none);
   buf_addf(&b, " ORDER BY created_at DESC, id ASC LIMIT %d", limit);
 
   if (b.fail || b.s == NULL) {
@@ -441,6 +449,39 @@ db_query_try(const cJSON *filter,
   return ok;
 }
 
+static bool
+db_count_try(const cJSON *filter, long long *out) {
+  struct buf b = {NULL, 0, 0, false};
+  int limit = 500;
+  bool none = false, ok = true;
+
+  *out = 0;
+  if (!cJSON_IsObject(filter)) return false;
+
+  pthread_mutex_lock(&g_mutex);
+  if (!ensure_conn()) {
+    pthread_mutex_unlock(&g_mutex);
+    return false;
+  }
+  buf_add(&b, "SELECT count(*) FROM event WHERE TRUE");
+  build_where(&b, filter, &limit, &none);
+
+  if (b.fail || b.s == NULL) {
+    ok = false;
+  } else if (!none) {
+    PGresult *r = run(b.s, 0, NULL);
+    if (r == NULL) {
+      ok = false;
+    } else {
+      if (PQntuples(r) > 0) *out = atoll(PQgetvalue(r, 0, 0));
+      PQclear(r);
+    }
+  }
+  free(b.s);
+  pthread_mutex_unlock(&g_mutex);
+  return ok;
+}
+
 /* A dropped connection is only noticed when a statement fails, so the
  * first operation after an outage always errors out.  Retry it once:
  * ensure_conn() reconnects at the start of the second attempt. */
@@ -462,10 +503,20 @@ db_query(const cJSON *filter,
   return true;
 }
 
+static bool
+db_count(const cJSON *filter, long long *out) {
+  if (!db_count_try(filter, out)) {
+    if (PQstatus(g_conn) == CONNECTION_OK) return false;
+    return db_count_try(filter, out);
+  }
+  return true;
+}
+
 void
 store_backend_postgresql(struct store_backend *be) {
   be->init = db_init;
   be->close = db_close;
   be->event = db_event;
   be->query = db_query;
+  be->count = db_count;
 }

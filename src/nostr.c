@@ -223,3 +223,19 @@ nostr_filters_match(const cJSON *filters, const cJSON *ev) {
     if (nostr_filter_match(f, ev)) return true;
   return false;
 }
+
+const char *
+nostr_tag_value(const cJSON *ev, const char *name) {
+  const cJSON *tags = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "tags");
+  const cJSON *t;
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn, *tv;
+    if (!cJSON_IsArray(t)) continue;
+    tn = t->child;
+    if (tn == NULL || !cJSON_IsString(tn) || strcmp(tn->valuestring, name) != 0)
+      continue;
+    tv = tn->next;
+    return (tv != NULL && cJSON_IsString(tv)) ? tv->valuestring : "";
+  }
+  return NULL;
+}

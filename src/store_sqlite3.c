@@ -247,44 +247,34 @@ struct row {
   char *raw;
 };
 
-static bool
-db_query(const cJSON *filter,
-         int (*emit)(const char *id, const char *raw, void *ud), void *ud) {
-  sqlite3_str *s;
-  sqlite3_stmt *st = NULL;
-  char *sql;
+/* Append the filter's conditions to a query of the event table.  Sets
+ * *none when the filter can match nothing and *limit when the filter
+ * carries one. */
+static void
+build_where(sqlite3_str *s, const cJSON *filter, int *limit, bool *none) {
   const cJSON *f;
-  int limit = 500, i, nrows = 0, cap = 0;
-  bool none = false, ok = true;
-  struct row *rows = NULL;
-
-  if (!cJSON_IsObject(filter)) return false;
-
-  pthread_mutex_lock(&g_mutex);
-  s = sqlite3_str_new(g_db);
-  sqlite3_str_appendall(s, "SELECT id, raw FROM event WHERE 1");
   for (f = filter->child; f != NULL; f = f->next) {
     const char *key = f->string;
     const cJSON *e;
     int n = 0;
     if (key == NULL) continue;
     if (strcmp(key, "ids") == 0 || strcmp(key, "authors") == 0) {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
       sqlite3_str_appendf(s, " AND %s IN (", key[0] == 'i' ? "id" : "pubkey");
       for (e = f->child; e != NULL; e = e->next)
         if (cJSON_IsString(e))
           sqlite3_str_appendf(s, "%s%Q", n++ ? "," : "", e->valuestring);
       sqlite3_str_appendall(s, ")");
-      if (n == 0) none = true;
+      if (n == 0) *none = true;
     } else if (strcmp(key, "kinds") == 0) {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
       sqlite3_str_appendall(s, " AND kind IN (");
       for (e = f->child; e != NULL; e = e->next)
         if (cJSON_IsNumber(e))
           sqlite3_str_appendf(s, "%s%d", n++ ? "," : "",
                               (int)e->valuedouble);
       sqlite3_str_appendall(s, ")");
-      if (n == 0) none = true;
+      if (n == 0) *none = true;
     } else if (strcmp(key, "since") == 0 && cJSON_IsNumber(f)) {
       sqlite3_str_appendf(s, " AND created_at >= %lld",
                           (long long)f->valuedouble);
@@ -296,11 +286,11 @@ db_query(const cJSON *filter,
       if (v >= 0) {
         /* clamp before the cast so a huge double stays in range; a limit of
          * zero asks for no stored events and is not an unset limit */
-        limit = v > 1000 ? 1000 : (int)v;
-        if (limit == 0) none = true;
+        *limit = v > 1000 ? 1000 : (int)v;
+        if (*limit == 0) *none = true;
       }
     } else if (key[0] == '#' && key[1] != '\0' && key[2] == '\0') {
-      if (!cJSON_IsArray(f)) { none = true; continue; }
+      if (!cJSON_IsArray(f)) { *none = true; continue; }
       sqlite3_str_appendf(s, " AND EXISTS (SELECT 1 FROM tag WHERE"
                              " tag.event_id = event.id AND tag.name = %Q"
                              " AND tag.value IN (", key + 1);
@@ -308,9 +298,27 @@ db_query(const cJSON *filter,
         if (cJSON_IsString(e))
           sqlite3_str_appendf(s, "%s%Q", n++ ? "," : "", e->valuestring);
       sqlite3_str_appendall(s, "))");
-      if (n == 0) none = true;
+      if (n == 0) *none = true;
     }
   }
+}
+
+static bool
+db_query(const cJSON *filter,
+         int (*emit)(const char *id, const char *raw, void *ud), void *ud) {
+  sqlite3_str *s;
+  sqlite3_stmt *st = NULL;
+  char *sql;
+  int limit = 500, i, nrows = 0, cap = 0;
+  bool none = false, ok = true;
+  struct row *rows = NULL;
+
+  if (!cJSON_IsObject(filter)) return false;
+
+  pthread_mutex_lock(&g_mutex);
+  s = sqlite3_str_new(g_db);
+  sqlite3_str_appendall(s, "SELECT id, raw FROM event WHERE 1");
+  build_where(s, filter, &limit, &none);
   sqlite3_str_appendf(s, " ORDER BY created_at DESC, id ASC LIMIT %d", limit);
   sql = sqlite3_str_finish(s);
 
@@ -358,10 +366,44 @@ db_query(const cJSON *filter,
   return ok;
 }
 
+static bool
+db_count(const cJSON *filter, long long *out) {
+  sqlite3_str *s;
+  sqlite3_stmt *st = NULL;
+  char *sql;
+  int limit = 500;
+  bool none = false, ok = true;
+
+  *out = 0;
+  if (!cJSON_IsObject(filter)) return false;
+
+  pthread_mutex_lock(&g_mutex);
+  s = sqlite3_str_new(g_db);
+  sqlite3_str_appendall(s, "SELECT count(*) FROM event WHERE 1");
+  build_where(s, filter, &limit, &none);
+  sql = sqlite3_str_finish(s);
+
+  if (sql == NULL) {
+    ok = false;
+  } else if (!none) {
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) {
+      fprintf(stderr, "sqlite3: %s: %s\n", sqlite3_errmsg(g_db), sql);
+      ok = false;
+    } else {
+      if (sqlite3_step(st) == SQLITE_ROW) *out = sqlite3_column_int64(st, 0);
+      sqlite3_finalize(st);
+    }
+  }
+  sqlite3_free(sql);
+  pthread_mutex_unlock(&g_mutex);
+  return ok;
+}
+
 void
 store_backend_sqlite3(struct store_backend *be) {
   be->init = db_init;
   be->close = db_close;
   be->event = db_event;
   be->query = db_query;
+  be->count = db_count;
 }

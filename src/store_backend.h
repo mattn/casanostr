@@ -11,6 +11,7 @@ struct store_backend {
   bool (*query)(const cJSON *filter,
                 int (*emit)(const char *id, const char *raw, void *ud),
                 void *ud);
+  bool (*count)(const cJSON *filter, long long *out);
 };
 
 void store_backend_sqlite3(struct store_backend *be);

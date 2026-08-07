@@ -12,7 +12,11 @@ the C++ sibling of this relay, is named.
 
 - NIP-01: EVENT / REQ / CLOSE, replaceable, ephemeral and addressable events
 - NIP-09: event deletion
-- NIP-11: relay information document
+- NIP-11: relay information document (with limitation)
+- NIP-40: expiration timestamps
+- NIP-45: COUNT
+- advertised in addition (already covered by NIP-01 storage semantics):
+  2, 4, 12, 15, 16, 20, 22, 28, 33
 - WebSocket: [civetweb](https://github.com/civetweb/civetweb) (git submodule, MIT)
 - JSON: [cJSON](https://github.com/DaveGamble/cJSON) (git submodule, MIT)
 - Signature verification: libsecp256k1 (BIP-340 schnorr)

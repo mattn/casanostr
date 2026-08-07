@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -22,6 +23,9 @@
 
 #define MAX_MESSAGE_SIZE (512 * 1024)
 #define MAX_SUBS 32
+#define MAX_LIMIT 1000
+/* NIP-40 / created_at sanity: allow this much clock skew into the future */
+#define CREATED_AT_UPPER_LIMIT 900
 /* each filter costs one query on REQ and one match per stored event
  * afterwards, so an uncapped list turns a single message into unbounded work */
 #define MAX_FILTERS 32
@@ -242,6 +246,24 @@ process_event(struct client *c, const cJSON *msg) {
     send_ok(c->conn, id, false, err);
     return;
   }
+  {
+    const cJSON *jca = cJSON_GetObjectItemCaseSensitive((cJSON *)ev,
+                                                        "created_at");
+    const char *exp = nostr_tag_value(ev, "expiration");
+    long long now = (long long)time(NULL);
+    if (cJSON_IsNumber(jca) &&
+        (long long)jca->valuedouble > now + CREATED_AT_UPPER_LIMIT) {
+      send_ok(c->conn, id, false, "invalid: created_at is in the future");
+      return;
+    }
+    if (exp != NULL) {
+      long long e = atoll(exp);
+      if (e > 0 && e <= now) {
+        send_ok(c->conn, id, false, "invalid: event has already expired");
+        return;
+      }
+    }
+  }
   raw = cJSON_PrintUnformatted((cJSON *)ev);
   if (raw == NULL) {
     send_ok(c->conn, id, false, "error: out of memory");
@@ -347,6 +369,60 @@ process_req(struct client *c, const cJSON *msg) {
   send_eose(c->conn, subid);
 }
 
+/* NIP-45: ["COUNT","<subid>",<filters...>] -> ["COUNT","<subid>",{"count":n}]
+ * Counts per filter are summed, so an event matching several filters is
+ * counted once per filter. */
+static void
+process_count(struct client *c, const cJSON *msg) {
+  const cJSON *jsid = cJSON_GetArrayItem((cJSON *)msg, 1);
+  const char *subid;
+  cJSON *j, *jc;
+  long long total = 0;
+  int i, n;
+
+  if (!cJSON_IsString(jsid) || !valid_subid(jsid->valuestring)) {
+    send_notice(c->conn, "invalid: bad subscription id");
+    return;
+  }
+  subid = jsid->valuestring;
+
+  n = cJSON_GetArraySize((cJSON *)msg);
+  if (n - 2 > MAX_FILTERS) {
+    send_closed(c->conn, subid, "invalid: too many filters");
+    return;
+  }
+  for (i = 2; i < n; i++) {
+    const cJSON *ff = cJSON_GetArrayItem((cJSON *)msg, i);
+    long long one = 0;
+    if (!cJSON_IsObject(ff)) {
+      send_closed(c->conn, subid, "invalid: filter is not an object");
+      return;
+    }
+    if (!store_count(ff, &one)) {
+      send_closed(c->conn, subid, "error: database failure");
+      return;
+    }
+    total += one;
+  }
+  if (n <= 2) {
+    cJSON *all = cJSON_CreateObject();
+    bool ok = all != NULL && store_count(all, &total);
+    cJSON_Delete(all);
+    if (!ok) {
+      send_closed(c->conn, subid, "error: database failure");
+      return;
+    }
+  }
+
+  j = cJSON_CreateArray();
+  cJSON_AddItemToArray(j, cJSON_CreateString("COUNT"));
+  cJSON_AddItemToArray(j, cJSON_CreateString(subid));
+  jc = cJSON_CreateObject();
+  cJSON_AddNumberToObject(jc, "count", (double)total);
+  cJSON_AddItemToArray(j, jc);
+  send_json(c->conn, j);
+}
+
 static void
 process_message(struct client *c, const char *data, size_t len) {
   cJSON *msg = cJSON_ParseWithLength(data, len);
@@ -364,6 +440,8 @@ process_message(struct client *c, const char *data, size_t len) {
     process_event(c, msg);
   } else if (strcmp(cmd->valuestring, "REQ") == 0) {
     process_req(c, msg);
+  } else if (strcmp(cmd->valuestring, "COUNT") == 0) {
+    process_count(c, msg);
   } else if (strcmp(cmd->valuestring, "CLOSE") == 0) {
     const cJSON *jsid = cJSON_GetArrayItem(msg, 1);
     if (cJSON_IsString(jsid) && valid_subid(jsid->valuestring))
@@ -475,16 +553,31 @@ http_handler(struct mg_connection *conn, void *ud) {
     return 404;
   }
   if (accept != NULL && strstr(accept, "application/nostr+json") != NULL) {
-    /* NIP-11 relay information document */
-    static const int nips[] = {1, 9, 11};
+    /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
+     * relay-side work beyond NIP-01 storage semantics, which are in. */
+    static const int nips[] = {1, 2, 4, 9, 11, 12, 15, 16,
+                               20, 22, 28, 33, 40, 45};
     cJSON *j = cJSON_CreateObject();
+    cJSON *lim = cJSON_CreateObject();
     char *s;
     cJSON_AddStringToObject(j, "name", RELAY_NAME);
     cJSON_AddStringToObject(j, "description", RELAY_DESCRIPTION);
     cJSON_AddStringToObject(j, "software", RELAY_SOFTWARE);
     cJSON_AddStringToObject(j, "version", VERSION);
     cJSON_AddStringToObject(j, "icon", RELAY_ICON);
-    cJSON_AddItemToObject(j, "supported_nips", cJSON_CreateIntArray(nips, 3));
+    cJSON_AddItemToObject(j, "supported_nips",
+                          cJSON_CreateIntArray(nips,
+                                               sizeof nips / sizeof *nips));
+    cJSON_AddNumberToObject(lim, "max_message_length", MAX_MESSAGE_SIZE);
+    cJSON_AddNumberToObject(lim, "max_subscriptions", MAX_SUBS);
+    cJSON_AddNumberToObject(lim, "max_filters", MAX_FILTERS);
+    cJSON_AddNumberToObject(lim, "max_limit", MAX_LIMIT);
+    cJSON_AddNumberToObject(lim, "max_subid_length", 64);
+    cJSON_AddNumberToObject(lim, "created_at_upper_limit",
+                            CREATED_AT_UPPER_LIMIT);
+    cJSON_AddBoolToObject(lim, "auth_required", false);
+    cJSON_AddBoolToObject(lim, "payment_required", false);
+    cJSON_AddItemToObject(j, "limitation", lim);
     s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
     if (s == NULL) {

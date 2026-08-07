@@ -23,4 +23,7 @@ bool store_query(const cJSON *filter,
                  int (*emit)(const char *id, const char *raw, void *ud),
                  void *ud);
 
+/* NIP-45: number of stored events matching a single filter. */
+bool store_count(const cJSON *filter, long long *out);
+
 #endif

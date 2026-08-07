@@ -24,4 +24,8 @@ bool nostr_filters_match(const cJSON *filters, const cJSON *ev);
 /* Is s exactly len characters of lowercase hex? */
 bool nostr_is_hex(const char *s, size_t len);
 
+/* First value of the first tag named `name`, or NULL if absent.
+ * A tag without a value yields "". */
+const char *nostr_tag_value(const cJSON *ev, const char *name);
+
 #endif

@@ -25,9 +25,14 @@ META_NEW=$("$GEN_EVENT" -s "$SK" -k 0 -T 2000 -c '{"name":"new"}')
 EV3=$("$GEN_EVENT" -s "$SK" -k 1 -c "to be deleted")
 ID3=$(printf '%s' "$EV3" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 EVD=$("$GEN_EVENT" -s "$SK" -k 5 -c "" -t "e=$ID3")
+NOW=$(date +%s)
+EV_EXPIRED=$("$GEN_EVENT" -s "$SK" -k 42 -c "already expired" -t "expiration=$((NOW - 100))")
+EV_EXPSOON=$("$GEN_EVENT" -s "$SK" -k 42 -c "expiring soon" -t "expiration=$((NOW + 2))")
+EV_FUTURE=$("$GEN_EVENT" -s "$SK" -k 1 -c "from the future" -T $((NOW + 9999)))
 
 python3 t/wstest.py "$PORT" "$EV1" "$EV2" "$BAD" \
-  "$META_OLD" "$META_NEW" "$EV3" "$EVD"
+  "$META_OLD" "$META_NEW" "$EV3" "$EVD" \
+  "$EV_EXPIRED" "$EV_EXPSOON" "$EV_FUTURE"
 
 curl -sf -H 'Accept: application/nostr+json' "http://127.0.0.1:$PORT/" |
   grep -q '"name":"casanostr"'

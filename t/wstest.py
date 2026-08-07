@@ -2,6 +2,7 @@
 """Minimal raw-socket websocket client + casanostr integration test.
 
 usage: wstest.py PORT EV1 EV2 BAD META_OLD META_NEW DEL_TARGET DEL_EVENT
+       EXPIRED EXPSOON FUTURE
 (all events as compact JSON strings, see t/run.sh)
 """
 import base64
@@ -11,6 +12,7 @@ import os
 import socket
 import struct
 import sys
+import time
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -222,6 +224,40 @@ def main():
     r = jrecv(a)
     assert r[0] == "EOSE", ("event was not deleted", r)
     print("nip-09 deletion: ok")
+
+    exp_past, exp_soon, future = (json.loads(x) for x in sys.argv[9:12])
+
+    # NIP-40: an already expired event and a far-future created_at are
+    # both rejected outright
+    jsend(a, ["EVENT", exp_past])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is False, r
+    jsend(a, ["EVENT", future])
+    r = jrecv(a)
+    assert r[0] == "OK" and r[2] is False, r
+    print("reject expired/future: ok")
+
+    # NIP-40: served while valid, hidden once the expiration passes
+    jsend(a, ["EVENT", exp_soon])
+    r = jrecv(a)
+    assert r[2] is True, r
+    jsend(a, ["REQ", "s5", {"ids": [exp_soon["id"]]}])
+    r = jrecv(a)
+    assert r[0] == "EVENT" and r[2]["id"] == exp_soon["id"], r
+    r = jrecv(a)
+    assert r[0] == "EOSE", r
+    jsend(a, ["CLOSE", "s5"])
+    time.sleep(3)
+    jsend(a, ["REQ", "s6", {"ids": [exp_soon["id"]]}])
+    r = jrecv(a)
+    assert r[0] == "EOSE", ("expired event still served", r)
+    print("nip-40 expiration: ok")
+
+    # NIP-45 COUNT: ev1 and ev2 survive (del_target was deleted)
+    jsend(a, ["COUNT", "c1", {"kinds": [1], "authors": [ev1["pubkey"]]}])
+    r = jrecv(a)
+    assert r[0] == "COUNT" and r[1] == "c1" and r[2]["count"] == 2, r
+    print("nip-45 count: ok")
 
     print("wstest: all assertions passed")
 
