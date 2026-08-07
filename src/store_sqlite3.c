@@ -326,11 +326,20 @@ db_query(const cJSON *filter,
         const char *raw = (const char *)sqlite3_column_text(st, 1);
         if (id == NULL || raw == NULL) continue;
         if (nrows == cap) {
-          cap = cap ? cap * 2 : 64;
-          rows = realloc(rows, sizeof(struct row) * cap);
+          int ncap = cap ? cap * 2 : 64;
+          struct row *nr = realloc(rows, sizeof(struct row) * ncap);
+          if (nr == NULL) { ok = false; break; }
+          rows = nr;
+          cap = ncap;
         }
         rows[nrows].id = strdup(id);
         rows[nrows].raw = strdup(raw);
+        if (rows[nrows].id == NULL || rows[nrows].raw == NULL) {
+          free(rows[nrows].id);
+          free(rows[nrows].raw);
+          ok = false;
+          break;
+        }
         nrows++;
       }
       sqlite3_finalize(st);

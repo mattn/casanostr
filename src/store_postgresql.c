@@ -409,11 +409,20 @@ db_query_try(const cJSON *filter,
       int nt = PQntuples(r);
       for (i = 0; i < nt; i++) {
         if (nrows == cap) {
-          cap = cap ? cap * 2 : 64;
-          rows = realloc(rows, sizeof(struct row) * cap);
+          int ncap = cap ? cap * 2 : 64;
+          struct row *nr = realloc(rows, sizeof(struct row) * ncap);
+          if (nr == NULL) { ok = false; break; }
+          rows = nr;
+          cap = ncap;
         }
         rows[nrows].id = strdup(PQgetvalue(r, i, 0));
         rows[nrows].raw = strdup(PQgetvalue(r, i, 1));
+        if (rows[nrows].id == NULL || rows[nrows].raw == NULL) {
+          free(rows[nrows].id);
+          free(rows[nrows].raw);
+          ok = false;
+          break;
+        }
         nrows++;
       }
       PQclear(r);
