@@ -32,6 +32,10 @@
 
 /* NIP-13: minimum proof of work demanded of incoming events; 0 disables it */
 static int g_min_pow;
+/* NIP-42 / NIP-62: this relay's public URL, used to tell a request aimed at
+ * us from one aimed elsewhere. Empty means we cannot tell, so NIP-62 only
+ * honours ALL_RELAYS. */
+static const char *g_service_url = "";
 
 struct sub {
   char id[65];
@@ -221,6 +225,36 @@ client_del_sub(struct client *c, const char *subid) {
   pthread_mutex_unlock(&g_clients_mutex);
 }
 
+/* NIP-17/59: a gift wrap is addressed to one recipient, so only hand it to a
+ * connection that has authenticated as a pubkey the event is p-tagged with.
+ * An unauthenticated connection sees no gift wraps at all. */
+/* `authed` is the connection's authenticated pubkey; callers already inside
+ * g_clients_mutex pass it straight from the client, others copy it first. */
+static bool
+may_see_gift_wrap(const char *authed, const cJSON *ev) {
+  const cJSON *kind = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "kind");
+  const cJSON *tags, *t;
+  int k;
+
+  if (!cJSON_IsNumber(kind)) return true;
+  k = (int)kind->valuedouble;
+  if (k != 1059 && k != 21059) return true;
+  if (authed[0] == '\0') return false;
+
+  tags = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "tags");
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn, *tv;
+    if (!cJSON_IsArray(t)) continue;
+    tn = t->child;
+    tv = tn != NULL ? tn->next : NULL;
+    if (cJSON_IsString(tn) && cJSON_IsString(tv) &&
+        strcmp(tn->valuestring, "p") == 0 &&
+        strcmp(tv->valuestring, authed) == 0)
+      return true;
+  }
+  return false;
+}
+
 /* A websocket write blocks until the peer accepts the data, so the
  * recipients are collected under the lock and written to without it —
  * otherwise one client that stops reading stalls every other connection.
@@ -238,6 +272,7 @@ broadcast_event(const cJSON *ev, const char *raw) {
 
   pthread_mutex_lock(&g_clients_mutex);
   for (c = g_clients; c != NULL; c = c->next) {
+    if (!may_see_gift_wrap(c->authed, ev)) continue;
     for (s = c->subs; s != NULL; s = s->next) {
       if (!nostr_filters_match(s->filters, ev)) continue;
       if (n == cap) {
@@ -266,6 +301,42 @@ deliver:
 }
 
 /* --- message handling --------------------------------------------------- */
+
+static int
+kind_of(const cJSON *ev) {
+  const cJSON *k = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "kind");
+  return cJSON_IsNumber(k) ? (int)k->valuedouble : -1;
+}
+
+/* NIP-62: relay URLs are compared ignoring a trailing slash, since clients
+ * and operators disagree about writing one. */
+static bool
+same_relay_url(const char *a, const char *b) {
+  size_t la = strlen(a), lb = strlen(b);
+  while (la > 0 && a[la - 1] == '/') la--;
+  while (lb > 0 && b[lb - 1] == '/') lb--;
+  return la == lb && la > 0 && strncmp(a, b, la) == 0;
+}
+
+/* NIP-62: does this kind-62 event ask *this* relay to forget the author? */
+static bool
+vanish_targets_us(const cJSON *ev) {
+  const cJSON *tags = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "tags");
+  const cJSON *t;
+  for (t = cJSON_IsArray(tags) ? tags->child : NULL; t != NULL; t = t->next) {
+    const cJSON *tn, *tv;
+    if (!cJSON_IsArray(t)) continue;
+    tn = t->child;
+    tv = tn != NULL ? tn->next : NULL;
+    if (!cJSON_IsString(tn) || !cJSON_IsString(tv)) continue;
+    if (strcmp(tn->valuestring, "relay") != 0) continue;
+    if (strcmp(tv->valuestring, "ALL_RELAYS") == 0) return true;
+    if (g_service_url[0] != '\0' &&
+        same_relay_url(tv->valuestring, g_service_url))
+      return true;
+  }
+  return false;
+}
 
 /* NIP-70: the marker is the single-element tag ["-"]; a longer tag whose
  * first element happens to be "-" is an ordinary tag. */
@@ -369,6 +440,18 @@ process_event(struct client *c, const cJSON *msg) {
   }
   /* the same shape a stored row rebuilds into, so live delivery and a
    * later query hand the client identical bytes */
+  /* NIP-62: honour the request before storing it, so the vanish cannot be
+   * undone by the request's own row surviving a later replay. */
+  if (kind_of(ev) == 62) {
+    const cJSON *pk = cJSON_GetObjectItemCaseSensitive((cJSON *)ev, "pubkey");
+    const cJSON *ca = cJSON_GetObjectItemCaseSensitive((cJSON *)ev,
+                                                       "created_at");
+    if (vanish_targets_us(ev) && cJSON_IsString(pk) && cJSON_IsNumber(ca) &&
+        !store_vanish(pk->valuestring, (long long)ca->valuedouble)) {
+      send_ok(c->conn, id, false, "error: failed to vanish events");
+      return;
+    }
+  }
   raw = nostr_event_json(ev);
   if (raw == NULL) {
     send_ok(c->conn, id, false, "error: out of memory");
@@ -390,6 +473,14 @@ process_event(struct client *c, const cJSON *msg) {
   free(raw);
 }
 
+/* Cheap pre-check so the common event does not get parsed twice: only a
+ * gift wrap can be withheld, and only those carry this kind. */
+static bool
+looks_like_gift_wrap(const char *raw) {
+  return strstr(raw, "\"kind\":1059") != NULL ||
+         strstr(raw, "\"kind\":21059") != NULL;
+}
+
 struct req_ctx {
   struct client *c;
   const char *subid;
@@ -403,6 +494,17 @@ req_emit(const char *id, const char *raw, void *ud) {
   int i;
   for (i = 0; i < rc->nseen; i++)
     if (strcmp(rc->seen[i], id) == 0) return 0;
+  if (looks_like_gift_wrap(raw)) {
+    cJSON *ev = cJSON_Parse(raw);
+    char authed[65];
+    bool allowed;
+    pthread_mutex_lock(&g_clients_mutex);
+    snprintf(authed, sizeof authed, "%s", rc->c->authed);
+    pthread_mutex_unlock(&g_clients_mutex);
+    allowed = ev == NULL || may_see_gift_wrap(authed, ev);
+    cJSON_Delete(ev);
+    if (!allowed) return 0;
+  }
   if (rc->nseen == rc->cap) {
     int ncap = rc->cap ? rc->cap * 2 : 64;
     void *ns = realloc(rc->seen, sizeof *rc->seen * ncap);
@@ -732,8 +834,9 @@ http_handler(struct mg_connection *conn, void *ud) {
   if (accept != NULL && strstr(accept, "application/nostr+json") != NULL) {
     /* NIP-11 relay information document.  2/4/12/15/16/20/28/33 need no
      * relay-side work beyond NIP-01 storage semantics, which are in. */
-    static const int nips[] = {1,  2,  4,  9,  11, 12, 13, 15, 16, 20,
-                               22, 26, 28, 33, 40, 42, 45, 50, 70};
+    static const int nips[] = {1,  2,  4,  9,  11, 12, 13, 15, 16, 17,
+                               20, 22, 26, 28, 33, 40, 42, 45, 50, 59,
+                               62, 70};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;
@@ -845,7 +948,12 @@ main(int argc, char **argv) {
     if (mp != NULL) g_min_pow = atoi(mp);
   }
 
-  while ((opt = getopt(argc, argv, "p:d:P:vh")) != -1) {
+  {
+    const char *u = getenv("SERVICE_URL");
+    if (u != NULL) g_service_url = u;
+  }
+
+  while ((opt = getopt(argc, argv, "p:d:P:u:vh")) != -1) {
     switch (opt) {
     case 'p':
       port = atoi(optarg);
@@ -856,13 +964,17 @@ main(int argc, char **argv) {
     case 'P':
       g_min_pow = atoi(optarg);
       break;
+    case 'u':
+      g_service_url = optarg;
+      break;
     case 'v':
       printf("%s %s\n", RELAY_NAME, VERSION);
       return 0;
     case 'h':
     default:
       fprintf(stderr,
-              "usage: %s [-p port] [-d dbfile|postgres://...] [-P min-pow]\n",
+              "usage: %s [-p port] [-d dbfile|postgres://...] [-P min-pow]"
+              " [-u service-url]\n",
               RELAY_NAME);
       return opt == 'h' ? 0 : 1;
     }

@@ -7,7 +7,7 @@ DB=${DB:-$(mktemp -u /tmp/casanostr-test-XXXXXX.db)}
 CASANOSTR=${CASANOSTR:-./casanostr}
 GEN_EVENT=${GEN_EVENT:-./t/gen_event}
 
-"$CASANOSTR" -p "$PORT" -d "$DB" &
+"$CASANOSTR" -p "$PORT" -d "$DB" -u "ws://127.0.0.1:$PORT" &
 PID=$!
 cleanup() {
   kill "$PID" 2>/dev/null || true

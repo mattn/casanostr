@@ -455,6 +455,18 @@ db_count(const cJSON *filter, long long *out) {
   return ok;
 }
 
+/* NIP-62: the request itself survives so it can propagate to other relays. */
+static bool
+db_vanish(const char *pubkey, long long until) {
+  bool ok;
+  pthread_mutex_lock(&g_mutex);
+  ok = execf("DELETE FROM event WHERE pubkey=%Q AND created_at<=%lld"
+             " AND kind<>62",
+             pubkey, until);
+  pthread_mutex_unlock(&g_mutex);
+  return ok;
+}
+
 void
 store_backend_sqlite3(struct store_backend *be) {
   be->init = db_init;
@@ -462,4 +474,5 @@ store_backend_sqlite3(struct store_backend *be) {
   be->event = db_event;
   be->query = db_query;
   be->count = db_count;
+  be->vanish = db_vanish;
 }

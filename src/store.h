@@ -26,4 +26,8 @@ bool store_query(const cJSON *filter,
 /* NIP-45: number of stored events matching a single filter. */
 bool store_count(const cJSON *filter, long long *out);
 
+/* NIP-62: drop everything this pubkey published up to and including
+ * `until`, except the vanish requests themselves. */
+bool store_vanish(const char *pubkey, long long until);
+
 #endif
