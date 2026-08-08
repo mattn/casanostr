@@ -830,6 +830,20 @@ on_signal(int sig) {
   net_stop();
 }
 
+/* hide the password of a connection URL before it reaches the log
+ * (cagliostr avoids the leak by not logging the URL at all) */
+static void
+redact_db(const char *path, char *out, size_t outlen) {
+  const char *scheme = strstr(path, "://");
+  const char *at = scheme != NULL ? strchr(scheme + 3, '@') : NULL;
+  const char *colon =
+      at != NULL ? memchr(scheme + 3, ':', (size_t)(at - scheme - 3)) : NULL;
+  if (colon == NULL)
+    snprintf(out, outlen, "%s", path);
+  else
+    snprintf(out, outlen, "%.*s:***%s", (int)(colon - path), path, at);
+}
+
 int
 main(int argc, char **argv) {
   int opt, port = 7447;
@@ -880,8 +894,12 @@ main(int argc, char **argv) {
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
-  printf("%s %s listening on port %d (db: %s)\n", RELAY_NAME, VERSION, port,
-         dbpath);
+  {
+    char shown[512];
+    redact_db(dbpath, shown, sizeof shown);
+    printf("%s %s listening on port %d (db: %s)\n", RELAY_NAME, VERSION, port,
+           shown);
+  }
 
   if (!net_serve(port, &callbacks, MAX_MESSAGE_SIZE)) {
     fprintf(stderr, "%s: failed to start server on port %d\n", RELAY_NAME,
