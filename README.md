@@ -17,7 +17,8 @@ the C++ sibling of this relay, is named.
 - NIP-45: COUNT
 - advertised in addition (already covered by NIP-01 storage semantics):
   2, 4, 12, 15, 16, 20, 22, 28, 33
-- WebSocket: [civetweb](https://github.com/civetweb/civetweb) (git submodule, MIT)
+- HTTP / WebSocket: single-threaded poll(2) event loop, implemented in-tree
+  (`src/net.c`, no library)
 - JSON: [cJSON](https://github.com/DaveGamble/cJSON) (git submodule, MIT)
 - Signature verification: libsecp256k1 (BIP-340 schnorr)
 - Storage: SQLite3 or PostgreSQL

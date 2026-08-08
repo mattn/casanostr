@@ -13,18 +13,13 @@ pkg_check_modules(SECP256K1 REQUIRED IMPORTED_TARGET libsecp256k1)
 pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
 pkg_check_modules(PQ REQUIRED IMPORTED_TARGET libpq)
 
-add_library(civetweb STATIC deps/civetweb-civetweb/src/civetweb.c)
-target_include_directories(civetweb PUBLIC deps/civetweb-civetweb/include)
-target_compile_definitions(civetweb PRIVATE
-  USE_WEBSOCKET NO_SSL NO_CGI NO_FILES NO_CACHING)
-target_compile_options(civetweb PRIVATE -w)
-
 add_library(cjson STATIC deps/davegamble-cjson/cJSON.c)
 target_include_directories(cjson PUBLIC deps/davegamble-cjson)
 target_compile_options(cjson PRIVATE -w)
 
 add_executable(casanostr
   src/main.c
+  src/net.c
   src/nostr.c
   src/store.c
   src/store_sqlite3.c
@@ -32,7 +27,7 @@ add_executable(casanostr
 target_compile_definitions(casanostr PRIVATE VERSION="${PROJECT_VERSION}")
 target_compile_options(casanostr PRIVATE -Wall -Wextra)
 target_link_libraries(casanostr PRIVATE
-  civetweb cjson
+  cjson
   PkgConfig::SECP256K1 PkgConfig::SQLITE3 PkgConfig::PQ
   OpenSSL::Crypto Threads::Threads m)
 

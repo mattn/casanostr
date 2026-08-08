@@ -1,5 +1,3 @@
 -Isrc
 -Ideps/davegamble-cjson
--Ideps/civetweb-civetweb/include
 -I/usr/include/postgresql
--DUSE_WEBSOCKET
