@@ -738,8 +738,7 @@ on_http_request(struct net_conn *conn, const char *method, const char *path,
      * relay-side work beyond NIP-01 storage semantics, which are in: a
      * monitor's 30166 is addressable and its 10166 replaceable, and both
      * already replace and serve correctly. */
-    static const int nips[] = {1,  2,  4,  9,  11, 12, 13, 15, 16, 17,
-                               20, 22, 26, 28, 33, 40, 42, 45, 50, 59,
+    static const int nips[] = {1, 4, 9, 11, 13, 17, 26, 40, 42, 45, 50, 59,
                                62, 66, 70};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
