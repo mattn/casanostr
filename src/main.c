@@ -739,7 +739,7 @@ on_http_request(struct net_conn *conn, const char *method, const char *path,
      * monitor's 30166 is addressable and its 10166 replaceable, and both
      * already replace and serve correctly. */
     static const int nips[] = {1, 4, 9, 11, 13, 17, 26, 40, 42, 45, 50, 59,
-                               62, 66, 70};
+                               62, 66, 70, 78};
     cJSON *j = cJSON_CreateObject();
     cJSON *lim = cJSON_CreateObject();
     char *s;
@@ -748,7 +748,7 @@ on_http_request(struct net_conn *conn, const char *method, const char *path,
     cJSON_AddStringToObject(j, "software", RELAY_SOFTWARE);
     cJSON_AddStringToObject(j, "version", VERSION);
     cJSON_AddStringToObject(j, "icon", RELAY_ICON);
-    cJSON_AddItemToObject(j, "supported_nips",
+        cJSON_AddItemToObject(j, "supported_nips",
                           cJSON_CreateIntArray(nips,
                                                sizeof nips / sizeof *nips));
     cJSON_AddNumberToObject(lim, "max_message_length", MAX_MESSAGE_SIZE);
