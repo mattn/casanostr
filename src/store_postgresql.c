@@ -33,9 +33,12 @@ static const char *schema =
     "CREATE INDEX IF NOT EXISTS idx_tag_event ON tag(event_id);"
     "CREATE INDEX IF NOT EXISTS idx_tag_name_value ON tag(name, value);"
     /* NIP-50: content lives inside the stored JSON, so index the extracted
-     * value rather than the serialized event */
-    "CREATE INDEX IF NOT EXISTS idx_event_content_search ON event"
-    " USING gin (to_tsvector('simple', content));";
+     * value rather than the serialized event.  A trigram index, not tsvector:
+     * search is a substring match, which needs the leading wildcard to stay
+     * off a sequential scan. */
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+    "CREATE INDEX IF NOT EXISTS contenttrgmidx ON event"
+    " USING gin (content gin_trgm_ops);";
 
 /* run a parameterized statement; NULL on error (caller must PQclear) */
 static PGresult *
@@ -334,6 +337,25 @@ buf_addq(struct buf *b, const char *s) {
   PQfreemem(q);
 }
 
+/* NIP-50: wrap a search string as a LIKE pattern, escaping the wildcards so
+ * a search for "100%" cannot match everything. Caller frees. */
+static char *
+like_pattern(const char *s) {
+  size_t n = strlen(s), i, j = 0;
+  char *out;
+  if (n > 4096) return NULL; /* a search term this long is not a search */
+  out = malloc(n * 2 + 3);
+  if (out == NULL) return NULL;
+  out[j++] = '%';
+  for (i = 0; i < n; i++) {
+    if (s[i] == '%' || s[i] == '_' || s[i] == '\\') out[j++] = '\\';
+    out[j++] = s[i];
+  }
+  out[j++] = '%';
+  out[j] = '\0';
+  return out;
+}
+
 struct row {
   char *id;
   char *raw;
@@ -373,19 +395,30 @@ build_where(struct buf *b, const cJSON *filter, int *limit, bool *none) {
     } else if (strcmp(key, "until") == 0 && cJSON_IsNumber(f)) {
       buf_addf(b, " AND created_at <= %lld", (long long)f->valuedouble);
     } else if (strcmp(key, "search") == 0) {
-      /* NIP-50: full text over content, which is what the GIN index in the
-       * schema covers. That index deliberately skips long content, so the
-       * same length bound has to appear here for the planner to use it. */
+      /* NIP-50: substring match over content, the same semantics
+       * store_sqlite3.c and the live matcher in nostr.c use, so a
+       * subscription answers the same before and after EOSE.  to_tsvector
+       * only matched whole lexemes, which never found a term inside a longer
+       * run of characters -- a search for "レバノン" missed a stored
+       * "レバノン案件取りたいなあ", and "東京" missed "東京都".  The trigram
+       * index in the schema keeps the leading wildcard off a sequential
+       * scan. */
+      char *pat;
       if (!cJSON_IsString(f) || f->valuestring[0] == '\0') {
         *none = true;
         continue;
       }
       /* the event is stored whole in `raw`, so pull content back out rather
        * than matching the serialized form and hitting ids and tags too */
-      buf_add(b, " AND to_tsvector('simple', content)"
-                 " @@ plainto_tsquery('simple', ");
-      buf_addq(b, f->valuestring);
-      buf_add(b, ")");
+      pat = like_pattern(f->valuestring);
+      if (pat == NULL) {
+        *none = true;
+        continue;
+      }
+      buf_add(b, " AND content ILIKE ");
+      buf_addq(b, pat);
+      buf_add(b, " ESCAPE '\\'");
+      free(pat);
     } else if (strcmp(key, "limit") == 0 && cJSON_IsNumber(f)) {
       double v = f->valuedouble;
       if (v >= 0) {
