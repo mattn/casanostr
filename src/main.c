@@ -751,6 +751,34 @@ on_http_request(struct net_conn *conn, const char *method, const char *path,
         cJSON_AddItemToObject(j, "supported_nips",
                           cJSON_CreateIntArray(nips,
                                                sizeof nips / sizeof *nips));
+    /* NIP-11 relay_countries: the two letter codes of the jurisdictions the
+     * relay operates under, comma separated in RELAY_COUNTRIES.  The key is
+     * left out rather than emitted empty when none are configured. */
+    {
+      const char *p = getenv("RELAY_COUNTRIES");
+      cJSON *countries = cJSON_CreateArray();
+      if (p == NULL) p = "JP";
+      while (*p != '\0') {
+        const char *start;
+        size_t n;
+        char code[16];
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        if (*p == '\0') break;
+        start = p;
+        while (*p != '\0' && *p != ',') p++;
+        n = (size_t)(p - start);
+        while (n > 0 && (start[n - 1] == ' ' || start[n - 1] == '\t')) n--;
+        if (n > 0 && n < sizeof code) {
+          memcpy(code, start, n);
+          code[n] = '\0';
+          cJSON_AddItemToArray(countries, cJSON_CreateString(code));
+        }
+      }
+      if (cJSON_GetArraySize(countries) > 0)
+        cJSON_AddItemToObject(j, "relay_countries", countries);
+      else
+        cJSON_Delete(countries);
+    }
     cJSON_AddNumberToObject(lim, "max_message_length", MAX_MESSAGE_SIZE);
     cJSON_AddNumberToObject(lim, "max_subscriptions", MAX_SUBS);
     cJSON_AddNumberToObject(lim, "max_filters", MAX_FILTERS);
