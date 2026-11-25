@@ -363,7 +363,7 @@ process_event(struct client *c, const cJSON *msg) {
     if (exp != NULL) {
       long long e = atoll(exp);
       if (e > 0 && e <= now) {
-        send_ok(c->conn, id, false, "invalid: event has already expired");
+        send_ok(c->conn, id, false, "invalid: event has expired");
         return;
       }
     }
